@@ -60,6 +60,26 @@ void *handle_client(void *arg) {
 			}
 
 			client->heartbeat_status = heartbeat.status;
+		} else if (packet_type == PacketTypeChatMessage) {
+			printf("received chat message\n");
+
+			ChatMessage msg = {0};
+
+			int n = recv(client->socket_fd, &msg.size, sizeof(msg.size), 0);
+
+			if (n < 1) {
+				break;
+			}
+
+			msg.msg = calloc(1, msg.size);
+
+			n = recv(client->socket_fd, msg.msg, msg.size, 0);
+
+			if (n < 1) {
+				break;
+			}
+
+			fprintf(stderr, "msg: %s\n", msg.msg);
 		}
 	}
 

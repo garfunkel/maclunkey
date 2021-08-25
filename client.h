@@ -1,6 +1,8 @@
 #ifndef _CLIENT_H_
 #define _CLIENT_H_
 
+#include "packets.h"
+
 #define CHAR_ESCAPE 27
 #define CHAR_ESCAPE_FUNCTION 91
 #define CHAR_ESCAPE_RIGHT 67
@@ -22,6 +24,7 @@ typedef struct {
 	char *msg;
 } ChatBuffer;
 
+void send_chat_message(int socket_fd, ChatMessage *msg);
 void setup_ui();
 
 #endif

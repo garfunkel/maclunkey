@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,16 +15,15 @@
 #include <termios.h>
 #include <unistd.h>
 
-void *handle_keyboard() {
+void *handle_keyboard(void *arg) {
+	int socket_fd = *(int *)arg;
 	struct termios new_term, old_term;
 
 	if (tcgetattr(STDIN_FILENO, &old_term) < 0) {
 		log_fatal("Could not get terminal attributes.");
 	}
 
-	if (tcgetattr(STDIN_FILENO, &new_term) < 0) {
-		log_fatal("Could not get terminal attributes.");
-	}
+	memcpy(&new_term, &old_term, sizeof(old_term));
 
 	new_term.c_lflag &= ~ECHO & ~ICANON;
 
@@ -38,6 +38,7 @@ void *handle_keyboard() {
 	while (TRUE) {
 		tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
 		int ch = getchar();
+		tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
 
 		if (ch == '\t') {
 			ch = ' ';
@@ -134,6 +135,16 @@ void *handle_keyboard() {
 
 			continue;
 		} else if (ch == '\n') {
+			ChatMessage msg = {.size = strlen(buffer.msg) + 1, .msg = buffer.msg};
+
+			send_chat_message(socket_fd, &msg);
+
+			buffer.msg[0] = '\0';
+			buffer.cursor_pos = 0;
+
+			printf("\033[%dG", CHAT_COL_START);
+			printf("\033[0K");
+
 			continue;
 		} else if (ch == 127) {
 			if (buffer.cursor_pos == 0) {
@@ -177,9 +188,19 @@ void *handle_keyboard() {
 			printf("%s", buffer.msg);
 			printf("\033[%dG", buffer.cursor_pos + CHAT_COL_START);
 		}
-
-		tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
 	}
+}
+
+void send_chat_message(int socket_fd, ChatMessage *msg) {
+	PacketType packet_type = PacketTypeChatMessage;
+
+	send(socket_fd, &packet_type, sizeof(packet_type), 0);
+	send(socket_fd, &msg->size, sizeof(msg->size), 0);
+	send(socket_fd, msg->msg, strlen(msg->msg) + 1, 0);
+}
+
+void terminal_resize() {
+	setup_ui();
 }
 
 void setup_ui() {
@@ -219,11 +240,13 @@ int main() {
 		log_fatal("Could not connect to server.");
 	}
 
+	signal(SIGWINCH, terminal_resize);
+
 	setup_ui();
 
 	pthread_t keyboard_thread;
 
-	pthread_create(&keyboard_thread, NULL, handle_keyboard, NULL);
+	pthread_create(&keyboard_thread, NULL, handle_keyboard, &socket_fd);
 
 	while (TRUE) {
 		Heartbeat heartbeat;
