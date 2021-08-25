@@ -19,7 +19,7 @@ void *heartbeat(void *arg) {
 		client->heartbeat_status = HeartbeatStatusPing;
 		send(client->socket_fd, &client->heartbeat_status, sizeof(client->heartbeat_status), 0);
 
-		sleep(5);
+		sleep(HEARTBEAT_INTERVAL);
 
 		if (client->heartbeat_status != HeartbeatStatusPong) {
 			printf("client did not send back pong\n");
