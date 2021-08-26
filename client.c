@@ -16,10 +16,24 @@
 #include <termios.h>
 #include <unistd.h>
 
+#define CHAT_COL_START strlen(CHAT_PROMPT) + 1
+
 #define setup_terminal() _reset_terminal(-1)
 #define reset_terminal() _reset_terminal(0)
 
-void *handle_keyboard(void *arg) {
+typedef struct {
+	unsigned int size;
+	unsigned int cursor_pos;
+	char *msg;
+} ChatBuffer;
+
+static void resize_terminal();
+static void _reset_terminal(int signum);
+static int setup_ui();
+static void *handle_keyboard(void *arg);
+static void send_chat_message(int socket_fd, ChatMessage *msg);
+
+static void *handle_keyboard(void *arg) {
 	int socket_fd = *(int *)arg;
 	ChatBuffer chat_buffer = {0};
 
@@ -48,10 +62,10 @@ void *handle_keyboard(void *arg) {
 
 		switch (ch) {
 			case INPUT_NULL:
-				printf("\033[%dG", CHAT_COL_START);
+				printf("\033[%luG", CHAT_COL_START);
 				printf("\033[0K");
 				printf("%s", chat_buffer.msg);
-				printf("\033[%dG", chat_buffer.cursor_pos + CHAT_COL_START);
+				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
 				break;
 
@@ -64,13 +78,13 @@ void *handle_keyboard(void *arg) {
 
 			case INPUT_HOME:
 				chat_buffer.cursor_pos = 0;
-				printf("\033[%dG", CHAT_COL_START);
+				printf("\033[%luG", CHAT_COL_START);
 
 				break;
 
 			case INPUT_END:
 				chat_buffer.cursor_pos = strlen(chat_buffer.msg);
-				printf("\033[%dG", chat_buffer.cursor_pos + CHAT_COL_START);
+				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
 				break;
 
@@ -142,7 +156,7 @@ void *handle_keyboard(void *arg) {
 				chat_buffer.msg[0] = '\0';
 				chat_buffer.cursor_pos = 0;
 
-				printf("\033[%dG", CHAT_COL_START);
+				printf("\033[%luG", CHAT_COL_START);
 				printf("\033[0K");
 
 				break;
@@ -159,10 +173,10 @@ void *handle_keyboard(void *arg) {
 				        chat_buffer.msg + chat_buffer.cursor_pos + 1,
 				        chat_buffer.size - chat_buffer.cursor_pos - 1);
 
-				printf("\033[%dG", CHAT_COL_START);
+				printf("\033[%luG", CHAT_COL_START);
 				printf("\033[0K");
 				printf("%s", chat_buffer.msg);
-				printf("\033[%dG", chat_buffer.cursor_pos + CHAT_COL_START);
+				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
 				break;
 
@@ -171,10 +185,10 @@ void *handle_keyboard(void *arg) {
 				        chat_buffer.msg + chat_buffer.cursor_pos + 1,
 				        chat_buffer.size - chat_buffer.cursor_pos - 1);
 
-				printf("\033[%dG", CHAT_COL_START);
+				printf("\033[%luG", CHAT_COL_START);
 				printf("\033[0K");
 				printf("%s", chat_buffer.msg);
-				printf("\033[%dG", chat_buffer.cursor_pos + CHAT_COL_START);
+				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
 				break;
 
@@ -186,10 +200,10 @@ void *handle_keyboard(void *arg) {
 					chat_buffer.msg[chat_buffer.cursor_pos] = (char)ch;
 					chat_buffer.cursor_pos++;
 
-					printf("\033[%dG", CHAT_COL_START);
+					printf("\033[%luG", CHAT_COL_START);
 					printf("\033[0K");
 					printf("%s", chat_buffer.msg);
-					printf("\033[%dG", chat_buffer.cursor_pos + CHAT_COL_START);
+					printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 				}
 		}
 
@@ -202,7 +216,7 @@ exit_loop:
 	return NULL;
 }
 
-void send_chat_message(int socket_fd, ChatMessage *msg) {
+static void send_chat_message(int socket_fd, ChatMessage *msg) {
 	PacketType packet_type = PacketTypeChatMessage;
 
 	send(socket_fd, &packet_type, sizeof(packet_type), 0);
@@ -210,18 +224,35 @@ void send_chat_message(int socket_fd, ChatMessage *msg) {
 	send(socket_fd, msg->msg, strlen(msg->msg) + 1, 0);
 }
 
+// FIXME: resize terminal before closing results in no final newline
 static void resize_terminal() {
-	setup_ui();
-
-	char null = INPUT_NULL;
-	ioctl(STDIN_FILENO, TIOCSTI, &null);
+	if (setup_ui() == 0) {
+		char null = INPUT_NULL;
+		ioctl(STDIN_FILENO, TIOCSTI, &null);
+	}
 }
 
-void setup_ui() {
+/*
+ * Draw UI on client terminal.
+ */
+static int setup_ui() {
 	struct winsize window_size;
 	ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size);
 
 	printf("\033[2J");
+
+	if (window_size.ws_col < MIN_WINDOW_WIDTH || window_size.ws_row < MIN_WINDOW_HEIGHT) {
+		printf("\033[HTerminal must have at least:\n"
+		       "\t* %d columns\n"
+		       "\t* %d rows\n"
+		       "Please resize to continue.\n",
+		       MIN_WINDOW_WIDTH,
+		       MIN_WINDOW_HEIGHT);
+
+		fflush(stdout);
+
+		return -1;
+	}
 
 	for (int row_num = 1; row_num < window_size.ws_row - 1; row_num++) {
 	}
@@ -236,9 +267,16 @@ void setup_ui() {
 
 	printf("\033[%u;%uH%s", window_size.ws_row, 1, CHAT_PROMPT);
 	fflush(stdout);
+
+	return 0;
 }
 
-void _reset_terminal(int signum) {
+/*
+ * Sets or unsets the user terminal.
+ * if signum <= 0: setup terminal
+ * if signum > 0: reset to previous settings
+ */
+static void _reset_terminal(int signum) {
 	static struct termios old_term = {0};
 
 	if (signum < 0) {
@@ -281,8 +319,6 @@ int main() {
 	struct sigaction reset_action = {.sa_handler = _reset_terminal};
 	sigaction(SIGINT, &reset_action, NULL);
 	sigaction(SIGTERM, &reset_action, NULL);
-
-	// atexit(reset_terminal);
 
 	struct sigaction resize_action = {.sa_flags = SA_RESTART, .sa_handler = resize_terminal};
 	sigaction(SIGWINCH, &resize_action, NULL);

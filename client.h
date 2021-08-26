@@ -16,16 +16,9 @@
 #define INPUT_BACKSPACE 127
 #define INPUT_DELETE 4
 
+#define MIN_WINDOW_WIDTH 40
+#define MIN_WINDOW_HEIGHT 20
 #define CHAT_PROMPT "Chat: "
-#define CHAT_COL_START 7
-
-typedef struct {
-	unsigned int size;
-	unsigned int cursor_pos;
-	char *msg;
-} ChatBuffer;
-
-void send_chat_message(int socket_fd, ChatMessage *msg);
-void setup_ui();
+#define CHAT_BOX_WIDTH 20
 
 #endif
