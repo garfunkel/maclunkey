@@ -18,7 +18,10 @@
 
 #define MIN_WINDOW_WIDTH 40
 #define MIN_WINDOW_HEIGHT 20
-#define CHAT_PROMPT "Chat: "
+#define CHAT_PROMPT "Chat:"
+#define PARTICIPANTS_TITLE "Participants"
+#define CHAT_TITLE "Chat"
 #define CHAT_BOX_WIDTH 20
+#define CHAT_COL_START strlen(CHAT_PROMPT) + 2
 
 #endif

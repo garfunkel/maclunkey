@@ -16,10 +16,8 @@
 #include <termios.h>
 #include <unistd.h>
 
-#define CHAT_COL_START strlen(CHAT_PROMPT) + 1
-
-#define setup_terminal() _reset_terminal(-1)
-#define reset_terminal() _reset_terminal(0)
+#define setup_terminal() configure_terminal(-1)
+#define reset_terminal() configure_terminal(0)
 
 typedef struct {
 	unsigned int size;
@@ -27,8 +25,8 @@ typedef struct {
 	char *msg;
 } ChatBuffer;
 
+static void configure_terminal(int signum);
 static void resize_terminal();
-static void _reset_terminal(int signum);
 static int setup_ui();
 static void *handle_keyboard(void *arg);
 static void send_chat_message(int socket_fd, ChatMessage *msg);
@@ -43,7 +41,9 @@ static void *handle_keyboard(void *arg) {
 		struct winsize window_size;
 		ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size);
 
-		if (chat_buffer.size != window_size.ws_col - 5) {
+		if (window_size.ws_col < MIN_WINDOW_WIDTH || window_size.ws_row < MIN_WINDOW_HEIGHT) {
+			continue;
+		} else if (chat_buffer.size != window_size.ws_col - 5) {
 			chat_buffer.msg = realloc(chat_buffer.msg, window_size.ws_col - 5);
 			unsigned int new_size = window_size.ws_col - 5;
 
@@ -255,28 +255,43 @@ static int setup_ui() {
 	}
 
 	for (int row_num = 1; row_num < window_size.ws_row - 1; row_num++) {
+		printf("\033[%u;%uH\u2503", row_num, window_size.ws_col - CHAT_BOX_WIDTH);
 	}
 
 	for (int col_num = 1; col_num <= window_size.ws_col; col_num++) {
-		if (col_num == window_size.ws_col - 16) {
-			printf("\033[%u;%uH\u253b", window_size.ws_row - 1, window_size.ws_col - 16);
+		if (col_num > window_size.ws_col - CHAT_BOX_WIDTH) {
+			printf("\033[%u;%uH\u2501", 1, col_num);
+			printf("\033[%u;%uH\u2501", 10, col_num);
+		}
+
+		if (col_num == window_size.ws_col - CHAT_BOX_WIDTH) {
+			printf("\033[%u;%uH\u2523", 1, col_num);
+			printf("\033[%u;%uH\u2523", 10, col_num);
+			printf("\033[%u;%uH\u253b", window_size.ws_row - 1, col_num);
 		} else {
 			printf("\033[%u;%uH\u2501", window_size.ws_row - 1, col_num);
 		}
 	}
 
-	printf("\033[%u;%uH%s", window_size.ws_row, 1, CHAT_PROMPT);
+	printf("\033[%u;%luH %s ",
+	       1,
+	       window_size.ws_col - (CHAT_BOX_WIDTH / 2) - (strlen(PARTICIPANTS_TITLE) / 2),
+	       PARTICIPANTS_TITLE);
+
+	printf("\033[%u;%luH %s ", 10, window_size.ws_col - (CHAT_BOX_WIDTH / 2) - (strlen(CHAT_TITLE) / 2), CHAT_TITLE);
+
+	printf("\033[%u;%uH%s ", window_size.ws_row, 1, CHAT_PROMPT);
 	fflush(stdout);
 
 	return 0;
 }
 
 /*
- * Sets or unsets the user terminal.
+ * Sets up or resets the user terminal.
  * if signum <= 0: setup terminal
  * if signum > 0: reset to previous settings
  */
-static void _reset_terminal(int signum) {
+static void configure_terminal(int signum) {
 	static struct termios old_term = {0};
 
 	if (signum < 0) {
@@ -316,7 +331,7 @@ int main() {
 		log_fatal("Could not connect to server.");
 	}
 
-	struct sigaction reset_action = {.sa_handler = _reset_terminal};
+	struct sigaction reset_action = {.sa_handler = configure_terminal};
 	sigaction(SIGINT, &reset_action, NULL);
 	sigaction(SIGTERM, &reset_action, NULL);
 
