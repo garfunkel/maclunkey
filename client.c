@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
@@ -15,180 +16,190 @@
 #include <termios.h>
 #include <unistd.h>
 
+#define setup_terminal() _reset_terminal(-1)
+#define reset_terminal() _reset_terminal(0)
+
 void *handle_keyboard(void *arg) {
 	int socket_fd = *(int *)arg;
-	struct termios new_term, old_term;
-
-	if (tcgetattr(STDIN_FILENO, &old_term) < 0) {
-		log_fatal("Could not get terminal attributes.");
-	}
-
-	memcpy(&new_term, &old_term, sizeof(old_term));
-
-	new_term.c_lflag &= ~ECHO & ~ICANON;
-
-	struct winsize window_size;
-	ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size);
-
-	int escape = 0;
-	ChatBuffer buffer = {0};
-	buffer.size = window_size.ws_col - 5;
-	buffer.msg = calloc(1, buffer.size);
+	ChatBuffer chat_buffer = {0};
 
 	while (TRUE) {
-		tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
-		int ch = getchar();
-		tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
+		int ch = 0;
+		read(STDIN_FILENO, &ch, sizeof(int));
+		struct winsize window_size;
+		ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size);
 
-		if (ch == '\t') {
-			ch = ' ';
-		} else if (ch == CHAR_HOME) {
-			buffer.cursor_pos = 0;
-			printf("\033[%dG", CHAT_COL_START);
+		if (chat_buffer.size != window_size.ws_col - 5) {
+			chat_buffer.msg = realloc(chat_buffer.msg, window_size.ws_col - 5);
+			unsigned int new_size = window_size.ws_col - 5;
 
-			continue;
-		} else if (ch == CHAR_END) {
-			buffer.cursor_pos = strlen(buffer.msg);
-			printf("\033[%dG", buffer.cursor_pos + CHAT_COL_START);
-
-			continue;
-		} else if (ch == CHAR_ESCAPE) {
-			escape = CHAR_ESCAPE;
-
-			continue;
-		} else if (escape == CHAR_ESCAPE && ch == CHAR_ESCAPE_FUNCTION) {
-			escape = CHAR_ESCAPE_FUNCTION;
-
-			continue;
-		} else if (escape == CHAR_ESCAPE && ch == CHAR_ESCAPE_ALT_LEFT) {
-			// If we are on a space or the start of a word, go back to the previous word.
-			while (buffer.cursor_pos > 0 &&
-			       (isspace(buffer.msg[buffer.cursor_pos]) || isspace(buffer.msg[buffer.cursor_pos - 1]))) {
-				buffer.cursor_pos--;
-
-				printf("\033[1D");
+			if (chat_buffer.size == 0) {
+				chat_buffer.msg[0] = '\0';
+			} else if (new_size < chat_buffer.size) {
+				chat_buffer.msg[new_size - 1] = '\0';
 			}
 
-			// Now go to the start of the word.
-			while (buffer.cursor_pos > 0 && !isspace(buffer.msg[buffer.cursor_pos - 1])) {
-				buffer.cursor_pos--;
-
-				printf("\033[1D");
+			if (chat_buffer.cursor_pos >= new_size - 1) {
+				chat_buffer.cursor_pos = new_size - 2;
 			}
 
-			continue;
-		} else if (escape == CHAR_ESCAPE && ch == CHAR_ESCAPE_ALT_RIGHT) {
-			// If we are on a space or the end of a word, go forward to the next word.
-			while (buffer.cursor_pos < strlen(buffer.msg) &&
-			       (isspace(buffer.msg[buffer.cursor_pos]) || isspace(buffer.msg[buffer.cursor_pos + 1]))) {
-				buffer.cursor_pos++;
+			chat_buffer.size = new_size;
+		}
 
-				printf("\033[1C");
-			}
+		switch (ch) {
+			case INPUT_NULL:
+				printf("\033[%dG", CHAT_COL_START);
+				printf("\033[0K");
+				printf("%s", chat_buffer.msg);
+				printf("\033[%dG", chat_buffer.cursor_pos + CHAT_COL_START);
 
-			// Now go to the end of the word.
-			while (buffer.cursor_pos < strlen(buffer.msg) && !isspace(buffer.msg[buffer.cursor_pos])) {
-				buffer.cursor_pos++;
+				break;
 
-				printf("\033[1C");
-			}
+			case INPUT_ESCAPE:
+				goto exit_loop;
 
-			continue;
-		} else if (escape == CHAR_ESCAPE_FUNCTION) {
-			escape = 0;
+			case INPUT_TAB:
+				// TODO: change speaker video
+				break;
 
-			switch (ch) {
-				case CHAR_ESCAPE_LEFT:
-					if (buffer.cursor_pos <= 0) {
-						break;
-					}
+			case INPUT_HOME:
+				chat_buffer.cursor_pos = 0;
+				printf("\033[%dG", CHAT_COL_START);
 
-					buffer.cursor_pos--;
+				break;
+
+			case INPUT_END:
+				chat_buffer.cursor_pos = strlen(chat_buffer.msg);
+				printf("\033[%dG", chat_buffer.cursor_pos + CHAT_COL_START);
+
+				break;
+
+			case INPUT_ALT_LEFT:
+				// If we are on a space or the start of a word, go back to the previous word.
+				while (chat_buffer.cursor_pos > 0 && (isspace(chat_buffer.msg[chat_buffer.cursor_pos]) ||
+				                                      isspace(chat_buffer.msg[chat_buffer.cursor_pos - 1]))) {
+					chat_buffer.cursor_pos--;
 
 					printf("\033[1D");
+				}
 
-					break;
+				// Now go to the start of the word.
+				while (chat_buffer.cursor_pos > 0 && !isspace(chat_buffer.msg[chat_buffer.cursor_pos - 1])) {
+					chat_buffer.cursor_pos--;
 
-				case CHAR_ESCAPE_RIGHT:
-					if (buffer.cursor_pos >= strlen(buffer.msg)) {
-						break;
-					}
+					printf("\033[1D");
+				}
 
-					buffer.cursor_pos++;
+				break;
+
+			case INPUT_ALT_RIGHT:
+				// If we are on a space or the end of a word, go forward to the next word.
+				while (chat_buffer.cursor_pos < strlen(chat_buffer.msg) &&
+				       (isspace(chat_buffer.msg[chat_buffer.cursor_pos]) ||
+				        isspace(chat_buffer.msg[chat_buffer.cursor_pos + 1]))) {
+					chat_buffer.cursor_pos++;
 
 					printf("\033[1C");
+				}
 
+				// Now go to the end of the word.
+				while (chat_buffer.cursor_pos < strlen(chat_buffer.msg) &&
+				       !isspace(chat_buffer.msg[chat_buffer.cursor_pos])) {
+					chat_buffer.cursor_pos++;
+
+					printf("\033[1C");
+				}
+
+				break;
+
+			case INPUT_LEFT:
+				if (chat_buffer.cursor_pos <= 0) {
 					break;
+				}
 
-				case CHAR_ESCAPE_HOME:
-					buffer.cursor_pos = 0;
+				chat_buffer.cursor_pos--;
+
+				printf("\033[1D");
+
+				break;
+
+			case INPUT_RIGHT:
+				if (chat_buffer.cursor_pos >= strlen(chat_buffer.msg)) {
+					break;
+				}
+
+				chat_buffer.cursor_pos++;
+
+				printf("\033[1C");
+
+				break;
+
+			case INPUT_LINE_FEED: {
+				ChatMessage msg = {.size = strlen(chat_buffer.msg) + 1, .msg = chat_buffer.msg};
+
+				send_chat_message(socket_fd, &msg);
+
+				chat_buffer.msg[0] = '\0';
+				chat_buffer.cursor_pos = 0;
+
+				printf("\033[%dG", CHAT_COL_START);
+				printf("\033[0K");
+
+				break;
+			}
+
+			case INPUT_BACKSPACE:
+				if (chat_buffer.cursor_pos == 0) {
+					continue;
+				}
+
+				chat_buffer.cursor_pos--;
+
+				memmove(chat_buffer.msg + chat_buffer.cursor_pos,
+				        chat_buffer.msg + chat_buffer.cursor_pos + 1,
+				        chat_buffer.size - chat_buffer.cursor_pos - 1);
+
+				printf("\033[%dG", CHAT_COL_START);
+				printf("\033[0K");
+				printf("%s", chat_buffer.msg);
+				printf("\033[%dG", chat_buffer.cursor_pos + CHAT_COL_START);
+
+				break;
+
+			case INPUT_DELETE:
+				memmove(chat_buffer.msg + chat_buffer.cursor_pos,
+				        chat_buffer.msg + chat_buffer.cursor_pos + 1,
+				        chat_buffer.size - chat_buffer.cursor_pos - 1);
+
+				printf("\033[%dG", CHAT_COL_START);
+				printf("\033[0K");
+				printf("%s", chat_buffer.msg);
+				printf("\033[%dG", chat_buffer.cursor_pos + CHAT_COL_START);
+
+				break;
+
+			default:
+				if (strlen(chat_buffer.msg) + 1 < chat_buffer.size) {
+					memmove(chat_buffer.msg + chat_buffer.cursor_pos + 1,
+					        chat_buffer.msg + chat_buffer.cursor_pos,
+					        chat_buffer.size - chat_buffer.cursor_pos - 1);
+					chat_buffer.msg[chat_buffer.cursor_pos] = (char)ch;
+					chat_buffer.cursor_pos++;
+
 					printf("\033[%dG", CHAT_COL_START);
-
-					break;
-
-				case CHAR_ESCAPE_END:
-					buffer.cursor_pos = strlen(buffer.msg);
-					printf("\033[%dG", buffer.cursor_pos + CHAT_COL_START);
-
-					break;
-			}
-
-			continue;
-		} else if (ch == '\n') {
-			ChatMessage msg = {.size = strlen(buffer.msg) + 1, .msg = buffer.msg};
-
-			send_chat_message(socket_fd, &msg);
-
-			buffer.msg[0] = '\0';
-			buffer.cursor_pos = 0;
-
-			printf("\033[%dG", CHAT_COL_START);
-			printf("\033[0K");
-
-			continue;
-		} else if (ch == 127) {
-			if (buffer.cursor_pos == 0) {
-				continue;
-			}
-
-			buffer.cursor_pos--;
-
-			memmove(buffer.msg + buffer.cursor_pos,
-			        buffer.msg + buffer.cursor_pos + 1,
-			        buffer.size - buffer.cursor_pos - 1);
-
-			printf("\033[%dG", CHAT_COL_START);
-			printf("\033[0K");
-			printf("%s", buffer.msg);
-			printf("\033[%dG", buffer.cursor_pos + CHAT_COL_START);
-
-			continue;
-		} else if (ch == 4) {
-			memmove(buffer.msg + buffer.cursor_pos,
-			        buffer.msg + buffer.cursor_pos + 1,
-			        buffer.size - buffer.cursor_pos - 1);
-
-			printf("\033[%dG", CHAT_COL_START);
-			printf("\033[0K");
-			printf("%s", buffer.msg);
-			printf("\033[%dG", buffer.cursor_pos + CHAT_COL_START);
-
-			continue;
+					printf("\033[0K");
+					printf("%s", chat_buffer.msg);
+					printf("\033[%dG", chat_buffer.cursor_pos + CHAT_COL_START);
+				}
 		}
 
-		if (strlen(buffer.msg) + 1 < buffer.size) {
-			memmove(buffer.msg + buffer.cursor_pos + 1,
-			        buffer.msg + buffer.cursor_pos,
-			        buffer.size - buffer.cursor_pos - 1);
-			buffer.msg[buffer.cursor_pos] = (char)ch;
-			buffer.cursor_pos++;
-
-			printf("\033[%dG", CHAT_COL_START);
-			printf("\033[0K");
-			printf("%s", buffer.msg);
-			printf("\033[%dG", buffer.cursor_pos + CHAT_COL_START);
-		}
+		fflush(stdout);
 	}
+
+exit_loop:
+	close(socket_fd);
+
+	return NULL;
 }
 
 void send_chat_message(int socket_fd, ChatMessage *msg) {
@@ -199,15 +210,18 @@ void send_chat_message(int socket_fd, ChatMessage *msg) {
 	send(socket_fd, msg->msg, strlen(msg->msg) + 1, 0);
 }
 
-void terminal_resize() {
+static void resize_terminal() {
 	setup_ui();
+
+	char null = INPUT_NULL;
+	ioctl(STDIN_FILENO, TIOCSTI, &null);
 }
 
 void setup_ui() {
 	struct winsize window_size;
 	ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size);
 
-	fprintf(stdout, "\033[2J");
+	printf("\033[2J");
 
 	for (int row_num = 1; row_num < window_size.ws_row - 1; row_num++) {
 	}
@@ -224,12 +238,36 @@ void setup_ui() {
 	fflush(stdout);
 }
 
+void _reset_terminal(int signum) {
+	static struct termios old_term = {0};
+
+	if (signum < 0) {
+		if (tcgetattr(STDIN_FILENO, &old_term) < 0) {
+			log_fatal("Could not get terminal attributes.");
+		}
+
+		struct termios new_term = {0};
+		memcpy(&new_term, &old_term, sizeof(old_term));
+		new_term.c_lflag &= ~ECHO & ~ICANON;
+		tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
+
+		printf("\033[?1049h");
+		fflush(stdout);
+
+		setup_ui();
+	} else {
+		tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
+
+		printf("\033[?1049l");
+		fflush(stdout);
+	}
+}
+
 int main() {
 	struct sockaddr_in server = {0};
 	server.sin_family = AF_INET;
 	inet_pton(AF_INET, "localhost", &server.sin_addr);
 	server.sin_port = htons(5000);
-
 	int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
 
 	if (socket_fd < 0) {
@@ -240,9 +278,16 @@ int main() {
 		log_fatal("Could not connect to server.");
 	}
 
-	signal(SIGWINCH, terminal_resize);
+	struct sigaction reset_action = {.sa_handler = _reset_terminal};
+	sigaction(SIGINT, &reset_action, NULL);
+	sigaction(SIGTERM, &reset_action, NULL);
 
-	setup_ui();
+	// atexit(reset_terminal);
+
+	struct sigaction resize_action = {.sa_flags = SA_RESTART, .sa_handler = resize_terminal};
+	sigaction(SIGWINCH, &resize_action, NULL);
+
+	setup_terminal();
 
 	pthread_t keyboard_thread;
 
@@ -268,6 +313,8 @@ int main() {
 			send(socket_fd, &heartbeat, sizeof(heartbeat), 0);
 		}
 	}
+
+	reset_terminal();
 
 	return EXIT_SUCCESS;
 }
