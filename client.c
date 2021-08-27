@@ -25,10 +25,11 @@ typedef struct {
 	char *msg;
 } ChatBuffer;
 
-static void configure_terminal(int signum);
+static int configure_terminal(int signum);
 static void resize_terminal();
 static int setup_ui();
 static void *handle_keyboard(void *arg);
+static void set_chat_message(const char *msg);
 static void send_chat_message(int socket_fd, ChatMessage *msg);
 
 static void *handle_keyboard(void *arg) {
@@ -38,6 +39,8 @@ static void *handle_keyboard(void *arg) {
 	while (TRUE) {
 		int ch = 0;
 		read(STDIN_FILENO, &ch, sizeof(int));
+		// fprintf(stderr, "%d ", ch);
+		// continue;
 		struct winsize window_size;
 		ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size);
 
@@ -62,8 +65,8 @@ static void *handle_keyboard(void *arg) {
 
 		switch (ch) {
 			case INPUT_NULL:
-				printf("\033[%luG%s", CHAT_COL_START, ANSI_CMD_CLEAR_LINE);
-				printf("%s", chat_buffer.msg);
+				set_chat_message(chat_buffer.msg);
+
 				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
 				break;
@@ -173,19 +176,18 @@ static void *handle_keyboard(void *arg) {
 				        chat_buffer.msg + chat_buffer.cursor_pos + 1,
 				        chat_buffer.size - chat_buffer.cursor_pos - 1);
 
-				printf("\033[%luG%s", CHAT_COL_START, ANSI_CMD_CLEAR_LINE);
-				printf("%s", chat_buffer.msg);
+				set_chat_message(chat_buffer.msg);
 				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
 				break;
 
 			case INPUT_DELETE:
+			case INPUT_CTRL_D:
 				memmove(chat_buffer.msg + chat_buffer.cursor_pos,
 				        chat_buffer.msg + chat_buffer.cursor_pos + 1,
 				        chat_buffer.size - chat_buffer.cursor_pos - 1);
 
-				printf("\033[%luG%s", CHAT_COL_START, ANSI_CMD_CLEAR_LINE);
-				printf("%s", chat_buffer.msg);
+				set_chat_message(chat_buffer.msg);
 				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
 				break;
@@ -198,8 +200,7 @@ static void *handle_keyboard(void *arg) {
 					chat_buffer.msg[chat_buffer.cursor_pos] = (char)ch;
 					chat_buffer.cursor_pos++;
 
-					printf("\033[%luG%s", CHAT_COL_START, ANSI_CMD_CLEAR_LINE);
-					printf("%s", chat_buffer.msg);
+					set_chat_message(chat_buffer.msg);
 					printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 				}
 		}
@@ -211,6 +212,15 @@ exit_loop:
 	close(socket_fd);
 
 	return NULL;
+}
+
+static void set_chat_message(const char *msg) {
+	struct winsize window_size;
+	ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size);
+
+	printf("\033[%u;%uH\033[K%s %s", window_size.ws_row, 1, CHAT_PROMPT, msg);
+
+	fflush(stdout);
 }
 
 static void send_chat_message(int socket_fd, ChatMessage *msg) {
@@ -277,8 +287,7 @@ static int setup_ui() {
 
 	printf("\033[%u;%luH %s ", 10, window_size.ws_col - (CHAT_BOX_WIDTH / 2) - (strlen(CHAT_TITLE) / 2), CHAT_TITLE);
 
-	printf("\033[%u;%uH%s ", window_size.ws_row, 1, CHAT_PROMPT);
-	fflush(stdout);
+	set_chat_message("");
 
 	return 0;
 }
@@ -288,58 +297,88 @@ static int setup_ui() {
  * if signum <= 0: setup terminal
  * if signum > 0: reset to previous settings
  */
-static void configure_terminal(int signum) {
+static int configure_terminal(int signum) {
 	static struct termios old_term = {0};
 
 	if (signum < 0) {
 		if (tcgetattr(STDIN_FILENO, &old_term) < 0) {
-			log_fatal("Could not get terminal attributes.");
+			log_error(ERROR_TERMINAL, "failed to get terminal attributes");
+
+			return -1;
 		}
 
 		struct termios new_term = {0};
 		memcpy(&new_term, &old_term, sizeof(old_term));
 		new_term.c_lflag &= ~ECHO & ~ICANON;
-		tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
+
+		if (tcsetattr(STDIN_FILENO, TCSANOW, &new_term) < 0) {
+			log_error(ERROR_TERMINAL, "failed to set terminal attributes");
+
+			return -1;
+		}
 
 		printf("%s", ANSI_CMD_ENABLE_ALTERNATE_BUFFER);
 		fflush(stdout);
 
 		setup_ui();
 	} else {
-		tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
+		if (tcsetattr(STDIN_FILENO, TCSANOW, &old_term) < 0) {
+			log_error(ERROR_TERMINAL, "failed to set terminal attributes");
+
+			return -1;
+		}
 
 		printf("%s", ANSI_CMD_DISABLE_ALTERNATE_BUFFER);
 		fflush(stdout);
 	}
+
+	return 0;
 }
 
 int main() {
 	struct sockaddr_in server = {0};
 	server.sin_family = AF_INET;
-	inet_pton(AF_INET, "localhost", &server.sin_addr);
+
+	if (inet_pton(AF_INET, "localhost", &server.sin_addr) < 0) {
+		log_fatal(ERROR_NETWORK, "failed to parse IP address");
+	}
+
 	server.sin_port = htons(5000);
 	int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
 
 	if (socket_fd < 0) {
-		log_fatal("Could not create socket.");
+		log_fatal(ERROR_NETWORK, "failed to construct socket");
 	}
 
 	if (connect(socket_fd, (struct sockaddr *)&server, sizeof(server)) < 0) {
-		log_fatal("Could not connect to server.");
+		log_fatal(ERROR_NETWORK, "failed to connect to server");
 	}
 
-	struct sigaction reset_action = {.sa_handler = configure_terminal};
-	sigaction(SIGINT, &reset_action, NULL);
-	sigaction(SIGTERM, &reset_action, NULL);
+	struct sigaction reset_action = {.sa_handler = (void (*)(int))configure_terminal};
+
+	if (sigaction(SIGINT, &reset_action, NULL) < 0) {
+		log_error(ERROR_TERMINAL, "failed to set SIGINT terminal reset signal");
+	}
+
+	if (sigaction(SIGTERM, &reset_action, NULL) < 0) {
+		log_error(ERROR_TERMINAL, "failed to set SIGTERM terminal reset signal");
+	}
 
 	struct sigaction resize_action = {.sa_flags = SA_RESTART, .sa_handler = resize_terminal};
-	sigaction(SIGWINCH, &resize_action, NULL);
 
-	setup_terminal();
+	if (sigaction(SIGWINCH, &resize_action, NULL) < 0) {
+		log_error(ERROR_TERMINAL, "failed to set SIGWINCH terminal resize signal");
+	}
+
+	if (setup_terminal() < 0) {
+		log_fatal(ERROR_TERMINAL, "failed to setup terminal");
+	}
 
 	pthread_t keyboard_thread;
 
-	pthread_create(&keyboard_thread, NULL, handle_keyboard, &socket_fd);
+	if (pthread_create(&keyboard_thread, NULL, handle_keyboard, &socket_fd) != 0) {
+		log_fatal(ERROR_THREAD, "failed to start keyboard listening thread");
+	}
 
 	while (TRUE) {
 		Heartbeat heartbeat;
@@ -358,7 +397,9 @@ int main() {
 		}
 	}
 
-	reset_terminal();
+	if (reset_terminal() < 0) {
+		log_error(ERROR_TERMINAL, "failed to reset terminal");
+	}
 
 	return EXIT_SUCCESS;
 }

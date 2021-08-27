@@ -96,7 +96,7 @@ int main() {
 	struct sockaddr_in client_addr = {0};
 
 	if (server_fd < 0) {
-		log_fatal("Could not create server socket.");
+		// log_fatal("Could not create server socket.");
 	}
 
 	server.sin_family = AF_INET;
@@ -109,13 +109,13 @@ int main() {
 	int err = bind(server_fd, (struct sockaddr *)&server, sizeof(server));
 
 	if (err < 0) {
-		log_fatal("Could not bind().");
+		// log_fatal("Could not bind().");
 	}
 
 	err = listen(server_fd, 128);
 
 	if (err < 0) {
-		log_fatal("Could not listen().");
+		// log_fatal("Could not listen().");
 	}
 
 	while (TRUE) {
@@ -124,7 +124,7 @@ int main() {
 		int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
 
 		if (client_fd < 0) {
-			log_fatal("Could not connect to client.");
+			// log_fatal("Could not connect to client.");
 		}
 
 		pthread_t thread;

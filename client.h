@@ -3,6 +3,35 @@
 
 #include "packets.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
+#define ERR_TABLE(ERR)                    \
+	ERR(ERROR_NETWORK, "Network error")   \
+	ERR(ERROR_TERMINAL, "Terminal error") \
+	ERR(ERROR_THREAD, "Thread error")     \
+	ERR(UNKNOWN_ERROR, "Unknown error")
+
+#define ERR_ID(id, string) id,
+#define ERR_STRING(id, string) string,
+
+enum ErrId
+{ ERR_TABLE(ERR_ID) };
+
+const char *error_to_string(const enum ErrId id) {
+	static const char *table[] = {ERR_TABLE(ERR_STRING)};
+
+	if (id < 0 || id >= UNKNOWN_ERROR) {
+		return table[UNKNOWN_ERROR];
+	}
+
+	return table[id];
+}
+
+#undef ERR_ID
+#undef ERR_STRING
+#undef ERR_TABLE
+
 #define INPUT_NULL 0
 #define INPUT_ESCAPE 27
 #define INPUT_LEFT 4479771
@@ -16,15 +45,17 @@
 #define INPUT_ALT_LEFT 25115
 #define INPUT_ALT_RIGHT 26139
 #define INPUT_BACKSPACE 127
-#define INPUT_DELETE 4
+#define INPUT_CTRL_D 4
+#define INPUT_DELETE 2117294875
 
 #define MIN_WINDOW_WIDTH 40
-#define MIN_WINDOW_HEIGHT 20
-#define CHAT_PROMPT "Chat:"
-#define PARTICIPANTS_TITLE "Participants"
-#define CHAT_TITLE "Chat"
+#define MIN_WINDOW_HEIGHT 18
 #define CHAT_BOX_WIDTH 20
 #define CHAT_COL_START strlen(CHAT_PROMPT) + 2
+
+const char *PARTICIPANTS_TITLE = "Participants";
+const char *CHAT_PROMPT = "Chat:";
+const char *CHAT_TITLE = "Chat";
 
 const char *ANSI_CMD_ENABLE_ALTERNATE_BUFFER = "\033[?1049h";
 const char *ANSI_CMD_DISABLE_ALTERNATE_BUFFER = "\033[?1049l";
