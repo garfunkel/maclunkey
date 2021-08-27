@@ -62,8 +62,7 @@ static void *handle_keyboard(void *arg) {
 
 		switch (ch) {
 			case INPUT_NULL:
-				printf("\033[%luG", CHAT_COL_START);
-				printf("\033[0K");
+				printf("\033[%luG%s", CHAT_COL_START, ANSI_CMD_CLEAR_LINE);
 				printf("%s", chat_buffer.msg);
 				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
@@ -77,12 +76,14 @@ static void *handle_keyboard(void *arg) {
 				break;
 
 			case INPUT_HOME:
+			case INPUT_HOME_2:
 				chat_buffer.cursor_pos = 0;
 				printf("\033[%luG", CHAT_COL_START);
 
 				break;
 
 			case INPUT_END:
+			case INPUT_END_2:
 				chat_buffer.cursor_pos = strlen(chat_buffer.msg);
 				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
@@ -94,14 +95,14 @@ static void *handle_keyboard(void *arg) {
 				                                      isspace(chat_buffer.msg[chat_buffer.cursor_pos - 1]))) {
 					chat_buffer.cursor_pos--;
 
-					printf("\033[1D");
+					printf("%s", ANSI_CMD_CURSOR_LEFT);
 				}
 
 				// Now go to the start of the word.
 				while (chat_buffer.cursor_pos > 0 && !isspace(chat_buffer.msg[chat_buffer.cursor_pos - 1])) {
 					chat_buffer.cursor_pos--;
 
-					printf("\033[1D");
+					printf("%s", ANSI_CMD_CURSOR_LEFT);
 				}
 
 				break;
@@ -113,7 +114,7 @@ static void *handle_keyboard(void *arg) {
 				        isspace(chat_buffer.msg[chat_buffer.cursor_pos + 1]))) {
 					chat_buffer.cursor_pos++;
 
-					printf("\033[1C");
+					printf("%s", ANSI_CMD_CURSOR_RIGHT);
 				}
 
 				// Now go to the end of the word.
@@ -121,7 +122,7 @@ static void *handle_keyboard(void *arg) {
 				       !isspace(chat_buffer.msg[chat_buffer.cursor_pos])) {
 					chat_buffer.cursor_pos++;
 
-					printf("\033[1C");
+					printf("%s", ANSI_CMD_CURSOR_RIGHT);
 				}
 
 				break;
@@ -133,7 +134,7 @@ static void *handle_keyboard(void *arg) {
 
 				chat_buffer.cursor_pos--;
 
-				printf("\033[1D");
+				printf("%s", ANSI_CMD_CURSOR_LEFT);
 
 				break;
 
@@ -144,7 +145,7 @@ static void *handle_keyboard(void *arg) {
 
 				chat_buffer.cursor_pos++;
 
-				printf("\033[1C");
+				printf("%s", ANSI_CMD_CURSOR_RIGHT);
 
 				break;
 
@@ -156,8 +157,7 @@ static void *handle_keyboard(void *arg) {
 				chat_buffer.msg[0] = '\0';
 				chat_buffer.cursor_pos = 0;
 
-				printf("\033[%luG", CHAT_COL_START);
-				printf("\033[0K");
+				printf("\033[%luG%s", CHAT_COL_START, ANSI_CMD_CLEAR_LINE);
 
 				break;
 			}
@@ -173,8 +173,7 @@ static void *handle_keyboard(void *arg) {
 				        chat_buffer.msg + chat_buffer.cursor_pos + 1,
 				        chat_buffer.size - chat_buffer.cursor_pos - 1);
 
-				printf("\033[%luG", CHAT_COL_START);
-				printf("\033[0K");
+				printf("\033[%luG%s", CHAT_COL_START, ANSI_CMD_CLEAR_LINE);
 				printf("%s", chat_buffer.msg);
 				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
@@ -185,23 +184,21 @@ static void *handle_keyboard(void *arg) {
 				        chat_buffer.msg + chat_buffer.cursor_pos + 1,
 				        chat_buffer.size - chat_buffer.cursor_pos - 1);
 
-				printf("\033[%luG", CHAT_COL_START);
-				printf("\033[0K");
+				printf("\033[%luG%s", CHAT_COL_START, ANSI_CMD_CLEAR_LINE);
 				printf("%s", chat_buffer.msg);
 				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
 				break;
 
 			default:
-				if (strlen(chat_buffer.msg) + 1 < chat_buffer.size) {
+				if (isprint(ch) && strlen(chat_buffer.msg) + 1 < chat_buffer.size) {
 					memmove(chat_buffer.msg + chat_buffer.cursor_pos + 1,
 					        chat_buffer.msg + chat_buffer.cursor_pos,
 					        chat_buffer.size - chat_buffer.cursor_pos - 1);
 					chat_buffer.msg[chat_buffer.cursor_pos] = (char)ch;
 					chat_buffer.cursor_pos++;
 
-					printf("\033[%luG", CHAT_COL_START);
-					printf("\033[0K");
+					printf("\033[%luG%s", CHAT_COL_START, ANSI_CMD_CLEAR_LINE);
 					printf("%s", chat_buffer.msg);
 					printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 				}
@@ -239,7 +236,7 @@ static int setup_ui() {
 	struct winsize window_size;
 	ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size);
 
-	printf("\033[2J");
+	printf("%s", ANSI_CMD_CLEAR_SCREEN);
 
 	if (window_size.ws_col < MIN_WINDOW_WIDTH || window_size.ws_row < MIN_WINDOW_HEIGHT) {
 		printf("\033[HTerminal must have at least:\n"
@@ -304,14 +301,14 @@ static void configure_terminal(int signum) {
 		new_term.c_lflag &= ~ECHO & ~ICANON;
 		tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
 
-		printf("\033[?1049h");
+		printf("%s", ANSI_CMD_ENABLE_ALTERNATE_BUFFER);
 		fflush(stdout);
 
 		setup_ui();
 	} else {
 		tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
 
-		printf("\033[?1049l");
+		printf("%s", ANSI_CMD_DISABLE_ALTERNATE_BUFFER);
 		fflush(stdout);
 	}
 }
@@ -352,13 +349,9 @@ int main() {
 			break;
 		}
 
-		// printf("recv: %d\n", n);
-
 		if (heartbeat.status == HeartbeatStatusPing) {
 			PacketType packet_type = PacketTypeHeartbeat;
 			heartbeat.status = HeartbeatStatusPong;
-
-			// printf("ponging\n");
 
 			send(socket_fd, &packet_type, sizeof(packet_type), 0);
 			send(socket_fd, &heartbeat, sizeof(heartbeat), 0);
