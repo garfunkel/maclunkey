@@ -19,6 +19,9 @@
 #define setup_terminal() configure_terminal(-1)
 #define reset_terminal() configure_terminal(0)
 
+/*
+ * Buffer for chat message which is yet to be sent.
+ */
 typedef struct {
 	unsigned int size;
 	unsigned int cursor_pos;
@@ -194,7 +197,10 @@ static void *keyboard_handler(void *arg) {
 				        chat_buffer.msg + chat_buffer.cursor_pos + 1,
 				        chat_buffer.size - chat_buffer.cursor_pos - 1);
 
-				set_chat_message(chat_buffer.msg);
+				if (set_chat_message(chat_buffer.msg) < 0) {
+					log_error(ERROR_TERMINAL, "failed to set chat message");
+				}
+
 				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
 				break;
@@ -205,7 +211,10 @@ static void *keyboard_handler(void *arg) {
 				        chat_buffer.msg + chat_buffer.cursor_pos + 1,
 				        chat_buffer.size - chat_buffer.cursor_pos - 1);
 
-				set_chat_message(chat_buffer.msg);
+				if (set_chat_message(chat_buffer.msg) < 0) {
+					log_error(ERROR_TERMINAL, "failed to set chat message");
+				}
+
 				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
 				break;
@@ -218,7 +227,10 @@ static void *keyboard_handler(void *arg) {
 					chat_buffer.msg[chat_buffer.cursor_pos] = (char)ch;
 					chat_buffer.cursor_pos++;
 
-					set_chat_message(chat_buffer.msg);
+					if (set_chat_message(chat_buffer.msg) < 0) {
+						log_error(ERROR_TERMINAL, "failed to set chat message");
+					}
+
 					printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 				}
 		}
