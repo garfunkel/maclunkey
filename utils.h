@@ -49,3 +49,8 @@
 	free(*ptr);    \
                    \
 	*ptr = NULL
+
+/*
+ * Placeholder function that does nothing on purpose.
+ */
+void do_nothing();

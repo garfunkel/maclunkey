@@ -3,18 +3,25 @@
 #include "packets.h"
 #include "utils.h"
 
+#include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
-static void *heartbeat(void *arg);
+static void *heartbeat_handler(void *arg);
 static void *client_handler(void *arg);
 
-static void *heartbeat(void *arg) {
+static void *heartbeat_handler(void *arg) {
 	Client *client = (Client *)arg;
+	struct sigaction disconnect_action = {.sa_handler = do_nothing};
+
+	if (sigaction(SIGUSR1, &disconnect_action, NULL) < 0) {
+		log_error(ERROR_TERMINAL, "failed to set SIGUSR1 client disconnection signal");
+	}
 
 	while (TRUE) {
 		client->heartbeat_status = HeartbeatStatusPing;
@@ -27,9 +34,20 @@ static void *heartbeat(void *arg) {
 		sleep(HEARTBEAT_INTERVAL);
 
 		if (client->heartbeat_status != HeartbeatStatusPong) {
+			// Check if client has already disconnected.
+			if (send(client->socket_fd, NULL, 0, 0) < 0) {
+				if (errno == EBADF) {
+					break;
+				} else {
+					log_error(ERROR_HEARTBEAT, "failed to check status of client");
+				}
+			}
+
 			log_error(ERROR_HEARTBEAT, "client has not responsed to last ping with a pong");
 
-			shutdown(client->socket_fd, SHUT_RDWR);
+			if (shutdown(client->socket_fd, SHUT_RDWR) < 0) {
+				log_error(ERROR_NETWORK, "failed to disconnect from client");
+			}
 
 			break;
 		}
@@ -41,31 +59,40 @@ static void *heartbeat(void *arg) {
 static void *client_handler(void *arg) {
 	Client client = {.socket_fd = *(int *)arg};
 
-	printf("Connected to client\n");
+	log_info("connected to client");
 
-	if (pthread_create(&client.heartbeat_thread, NULL, heartbeat, &client) != 0) {
+	if (pthread_create(&client.heartbeat_thread, NULL, heartbeat_handler, &client) != 0) {
 		log_fatal(ERROR_THREAD, "failed to create client heartbeat thread");
-	}
-
-	if (pthread_detach(client.heartbeat_thread) != 0) {
-		log_fatal(ERROR_THREAD, "failed to detach client heartbeat thread");
 	}
 
 	while (TRUE) {
 		PacketType packet_type;
 		int n = recv(client.socket_fd, &packet_type, sizeof packet_type, 0);
 
-		if (n < 1) {
+		if (n < 0) {
+			log_error(ERROR_NETWORK, "failed to receive packet type");
+
+			break;
+		} else if (n == 0) {
+			// Instruct the heartbeat handler to finish up.
+			if (pthread_kill(client.heartbeat_thread, SIGUSR1) != 0) {
+				log_error(ERROR_THREAD, "failed to signal client heartbeat thread to finish");
+			}
+
+			if (close(client.socket_fd) < 0) {
+				log_error(ERROR_NETWORK, "failed to disconnect from client");
+			}
+
 			break;
 		}
 
 		if (packet_type == PacketTypeHeartbeat) {
-			printf("received pong packet\n");
-
 			Heartbeat heartbeat;
 			int n = recv(client.socket_fd, &heartbeat, sizeof heartbeat, 0);
 
 			if (n < 1) {
+				log_error(ERROR_NETWORK, "failed to receive pong");
+
 				break;
 			}
 
@@ -77,6 +104,8 @@ static void *client_handler(void *arg) {
 			int n = recv(client.socket_fd, &msg.size, sizeof msg.size, 0);
 
 			if (n < 1) {
+				log_error(ERROR_NETWORK, "failed to receive chat message size");
+
 				break;
 			}
 
@@ -84,12 +113,26 @@ static void *client_handler(void *arg) {
 			n = recv(client.socket_fd, msg.msg, msg.size, 0);
 
 			if (n < 1) {
+				log_error(ERROR_NETWORK, "failed to receive chat message");
+
 				break;
 			}
 
 			fprintf(stderr, "msg: %s\n", msg.msg);
 
 			freep(&msg.msg);
+		}
+	}
+
+	if (pthread_join(client.heartbeat_thread, NULL) != 0) {
+		log_fatal(ERROR_THREAD, "failed to join client heartbeat thread");
+	}
+
+	if (close(client.socket_fd) < 0) {
+		if (errno == EBADF) {
+			log_info("client disconnected");
+		} else {
+			log_errorf(ERROR_NETWORK, "failed to disconnect from client: %d", errno);
 		}
 	}
 
@@ -137,6 +180,10 @@ int main() {
 		if (pthread_detach(thread) != 0) {
 			log_fatal(ERROR_THREAD, "failed to detach client handling thread");
 		}
+	}
+
+	if (close(server_fd) < 0) {
+		log_error(ERROR_NETWORK, "failed to shutdown server socket");
 	}
 
 	return EXIT_SUCCESS;
