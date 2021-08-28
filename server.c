@@ -10,19 +10,24 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-void *heartbeat(void *arg) {
+static void *heartbeat(void *arg);
+static void *client_handler(void *arg);
+
+static void *heartbeat(void *arg) {
 	Client *client = (Client *)arg;
 
 	while (TRUE) {
-		printf("pinging\n");
-
 		client->heartbeat_status = HeartbeatStatusPing;
-		send(client->socket_fd, &client->heartbeat_status, sizeof(client->heartbeat_status), 0);
 
+		if (send(client->socket_fd, &client->heartbeat_status, sizeof client->heartbeat_status, 0) < 0) {
+			break;
+		}
+
+		// Wait for client_handler to receive pong.
 		sleep(HEARTBEAT_INTERVAL);
 
 		if (client->heartbeat_status != HeartbeatStatusPong) {
-			printf("client did not send back pong\n");
+			log_error(ERROR_HEARTBEAT, "client has not responsed to last ping with a pong");
 
 			shutdown(client->socket_fd, SHUT_RDWR);
 
@@ -33,17 +38,22 @@ void *heartbeat(void *arg) {
 	return NULL;
 }
 
-void *handle_client(void *arg) {
-	Client *client = malloc(sizeof(Client));
-	client->socket_fd = *(int *)arg;
+static void *client_handler(void *arg) {
+	Client client = {.socket_fd = *(int *)arg};
 
 	printf("Connected to client\n");
 
-	pthread_create(&client->heartbeat_thread, NULL, heartbeat, client);
+	if (pthread_create(&client.heartbeat_thread, NULL, heartbeat, &client) != 0) {
+		log_fatal(ERROR_THREAD, "failed to create client heartbeat thread");
+	}
+
+	if (pthread_detach(client.heartbeat_thread) != 0) {
+		log_fatal(ERROR_THREAD, "failed to detach client heartbeat thread");
+	}
 
 	while (TRUE) {
 		PacketType packet_type;
-		int n = recv(client->socket_fd, &packet_type, sizeof(packet_type), 0);
+		int n = recv(client.socket_fd, &packet_type, sizeof packet_type, 0);
 
 		if (n < 1) {
 			break;
@@ -53,82 +63,81 @@ void *handle_client(void *arg) {
 			printf("received pong packet\n");
 
 			Heartbeat heartbeat;
-			int n = recv(client->socket_fd, &heartbeat, sizeof(heartbeat), 0);
+			int n = recv(client.socket_fd, &heartbeat, sizeof heartbeat, 0);
 
 			if (n < 1) {
 				break;
 			}
 
-			client->heartbeat_status = heartbeat.status;
+			client.heartbeat_status = heartbeat.status;
 		} else if (packet_type == PacketTypeChatMessage) {
 			printf("received chat message\n");
 
 			ChatMessage msg = {0};
-
-			int n = recv(client->socket_fd, &msg.size, sizeof(msg.size), 0);
+			int n = recv(client.socket_fd, &msg.size, sizeof msg.size, 0);
 
 			if (n < 1) {
 				break;
 			}
 
 			msg.msg = calloc(1, msg.size);
-
-			n = recv(client->socket_fd, msg.msg, msg.size, 0);
+			n = recv(client.socket_fd, msg.msg, msg.size, 0);
 
 			if (n < 1) {
 				break;
 			}
 
 			fprintf(stderr, "msg: %s\n", msg.msg);
+
+			freep(&msg.msg);
 		}
 	}
-
-	pthread_join(client->heartbeat_thread, NULL);
-
-	free(client);
 
 	return NULL;
 }
 
 int main() {
 	int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-	struct sockaddr_in server = {0};
-	struct sockaddr_in client_addr = {0};
 
 	if (server_fd < 0) {
-		// log_fatal("Could not create server socket.");
+		log_fatal(ERROR_NETWORK, "failed to construct socket");
 	}
 
-	server.sin_family = AF_INET;
-	server.sin_port = htons(5000);
-	server.sin_addr.s_addr = htonl(INADDR_ANY);
+	struct sockaddr_in server = {.sin_family = AF_INET, .sin_port = htons(5000), .sin_addr.s_addr = htonl(INADDR_ANY)};
 
-	int opt_val = 1;
-	setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt_val, sizeof opt_val);
+	int opt_val = TRUE;
 
-	int err = bind(server_fd, (struct sockaddr *)&server, sizeof(server));
-
-	if (err < 0) {
-		// log_fatal("Could not bind().");
+	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt_val, sizeof opt_val) < 0) {
+		log_fatal(ERROR_NETWORK, "failed to set socket options");
 	}
 
-	err = listen(server_fd, 128);
+	if (bind(server_fd, (struct sockaddr *)&server, sizeof server) < 0) {
+		log_fatal(ERROR_NETWORK, "failed to bind to socket");
+	}
 
-	if (err < 0) {
-		// log_fatal("Could not listen().");
+	if (listen(server_fd, 128) < 0) {
+		log_fatal(ERROR_NETWORK, "failed to listen on bound socket");
 	}
 
 	while (TRUE) {
-		socklen_t client_addr_len = sizeof(client_addr);
-
+		struct sockaddr_in client_addr = {0};
+		socklen_t client_addr_len = sizeof client_addr;
 		int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
 
 		if (client_fd < 0) {
-			// log_fatal("Could not connect to client.");
+			log_fatal(ERROR_NETWORK, "failed to accept client connection");
 		}
 
 		pthread_t thread;
-		pthread_create(&thread, NULL, handle_client, &client_fd);
-		pthread_detach(thread);
+
+		if (pthread_create(&thread, NULL, client_handler, &client_fd) != 0) {
+			log_fatal(ERROR_THREAD, "failed to start client handling thread");
+		}
+
+		if (pthread_detach(thread) != 0) {
+			log_fatal(ERROR_THREAD, "failed to detach client handling thread");
+		}
 	}
+
+	return EXIT_SUCCESS;
 }

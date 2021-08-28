@@ -41,7 +41,7 @@ static void *keyboard_handler(void *arg) {
 
 	while (TRUE) {
 		int ch = 0;
-		int n = read(STDIN_FILENO, &ch, sizeof(int));
+		int n = read(STDIN_FILENO, &ch, sizeof ch);
 
 		if (n <= 0) {
 			break;
@@ -265,13 +265,13 @@ static int send_chat_message(int socket_fd, ChatMessage *msg) {
 
 	PacketType packet_type = PacketTypeChatMessage;
 
-	if (send(socket_fd, &packet_type, sizeof(packet_type), 0) < 0) {
+	if (send(socket_fd, &packet_type, sizeof packet_type, 0) < 0) {
 		log_error(ERROR_NETWORK, "failed to send packet type");
 
 		return -1;
 	}
 
-	if (send(socket_fd, &msg->size, sizeof(msg->size), 0) < 0) {
+	if (send(socket_fd, &msg->size, sizeof msg->size, 0) < 0) {
 		log_error(ERROR_NETWORK, "failed to send message size");
 
 		return -1;
@@ -390,7 +390,7 @@ static int configure_terminal(int signum) {
 		}
 
 		struct termios new_term = {0};
-		memcpy(&new_term, &old_term, sizeof(old_term));
+		memcpy(&new_term, &old_term, sizeof old_term);
 		new_term.c_lflag &= ~ECHO & ~ICANON;
 
 		if (tcsetattr(STDIN_FILENO, TCSANOW, &new_term) < 0) {
@@ -437,7 +437,7 @@ int main() {
 		log_fatal(ERROR_NETWORK, "failed to construct socket");
 	}
 
-	if (connect(socket_fd, (struct sockaddr *)&server, sizeof(server)) < 0) {
+	if (connect(socket_fd, (struct sockaddr *)&server, sizeof server) < 0) {
 		log_fatal(ERROR_NETWORK, "failed to connect to server");
 	}
 
@@ -457,6 +457,8 @@ int main() {
 		log_error(ERROR_TERMINAL, "failed to set SIGWINCH terminal resize signal");
 	}
 
+	// get room
+
 	if (setup_terminal() < 0) {
 		log_fatal(ERROR_TERMINAL, "failed to setup terminal");
 	}
@@ -469,7 +471,7 @@ int main() {
 
 	while (TRUE) {
 		Heartbeat heartbeat;
-		int n = recv(socket_fd, &heartbeat, sizeof(heartbeat), 0);
+		int n = recv(socket_fd, &heartbeat, sizeof heartbeat, 0);
 
 		if (n <= 0) {
 			break;
@@ -479,13 +481,13 @@ int main() {
 			PacketType packet_type = PacketTypeHeartbeat;
 			heartbeat.status = HeartbeatStatusPong;
 
-			n = send(socket_fd, &packet_type, sizeof(packet_type), 0);
+			n = send(socket_fd, &packet_type, sizeof packet_type, 0);
 
 			if (n <= 0) {
 				break;
 			}
 
-			n = send(socket_fd, &heartbeat, sizeof(heartbeat), 0);
+			n = send(socket_fd, &heartbeat, sizeof heartbeat, 0);
 
 			if (n <= 0) {
 				break;

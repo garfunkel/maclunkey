@@ -1,5 +1,4 @@
-#ifndef _UTILS_H_
-#define _UTILS_H_
+#pragma once
 
 #define FALSE 0
 #define TRUE 1
@@ -46,4 +45,7 @@
 	#define log_infof(fmt, ...)
 #endif
 
-#endif
+#define freep(ptr) \
+	free(*ptr);    \
+                   \
+	*ptr = NULL

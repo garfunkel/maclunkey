@@ -1,5 +1,4 @@
-#ifndef _PACKETS_H_
-#define _PACKETS_H_
+#pragma once
 
 #include <sys/types.h>
 
@@ -26,5 +25,3 @@ typedef struct {
 	size_t size;
 	char *msg;
 } ChatMessage;
-
-#endif
