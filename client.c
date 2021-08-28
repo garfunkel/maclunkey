@@ -26,23 +26,33 @@ typedef struct {
 } ChatBuffer;
 
 static int configure_terminal(int signum);
-static void resize_terminal();
+static void resize_terminal_handler();
 static int setup_ui();
-static void *handle_keyboard(void *arg);
-static void set_chat_message(const char *msg);
-static void send_chat_message(int socket_fd, ChatMessage *msg);
+static void *keyboard_handler(void *arg);
+static int set_chat_message(const char *msg);
+static int send_chat_message(int socket_fd, ChatMessage *msg);
 
-static void *handle_keyboard(void *arg) {
+static void *keyboard_handler(void *arg) {
 	int socket_fd = *(int *)arg;
 	ChatBuffer chat_buffer = {0};
 
 	while (TRUE) {
 		int ch = 0;
-		read(STDIN_FILENO, &ch, sizeof(int));
+		int n = read(STDIN_FILENO, &ch, sizeof(int));
+
+		if (n <= 0) {
+			break;
+		}
+
 		// fprintf(stderr, "%d ", ch);
 		// continue;
 		struct winsize window_size;
-		ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size);
+
+		if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) < 0) {
+			log_error(ERROR_TERMINAL, "failed to get terminal size");
+
+			return NULL;
+		}
 
 		if (window_size.ws_col < MIN_WINDOW_WIDTH || window_size.ws_row < MIN_WINDOW_HEIGHT) {
 			continue;
@@ -65,14 +75,20 @@ static void *handle_keyboard(void *arg) {
 
 		switch (ch) {
 			case INPUT_NULL:
-				set_chat_message(chat_buffer.msg);
+				if (set_chat_message(chat_buffer.msg) < 0) {
+					log_error(ERROR_TERMINAL, "failed to set chat message");
+				}
 
 				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
 
 				break;
 
 			case INPUT_ESCAPE:
-				goto exit_loop;
+				if (close(socket_fd) < 0) {
+					log_error(ERROR_NETWORK, "failed to disconnect from server");
+				}
+
+				return NULL;
 
 			case INPUT_TAB:
 				// TODO: change speaker video
@@ -155,7 +171,9 @@ static void *handle_keyboard(void *arg) {
 			case INPUT_LINE_FEED: {
 				ChatMessage msg = {.size = strlen(chat_buffer.msg) + 1, .msg = chat_buffer.msg};
 
-				send_chat_message(socket_fd, &msg);
+				if (send_chat_message(socket_fd, &msg) < 0) {
+					log_error(ERROR_NETWORK, "failed to send message");
+				}
 
 				chat_buffer.msg[0] = '\0';
 				chat_buffer.cursor_pos = 0;
@@ -208,34 +226,75 @@ static void *handle_keyboard(void *arg) {
 		fflush(stdout);
 	}
 
-exit_loop:
-	close(socket_fd);
+	if (close(socket_fd) < 0) {
+		log_error(ERROR_NETWORK, "failed to disconnect from server");
+	}
 
 	return NULL;
 }
 
-static void set_chat_message(const char *msg) {
+static int set_chat_message(const char *msg) {
 	struct winsize window_size;
-	ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size);
+
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) < 0) {
+		log_error(ERROR_TERMINAL, "failed to get terminal size");
+
+		return -1;
+	}
 
 	printf("\033[%u;%uH\033[K%s %s", window_size.ws_row, 1, CHAT_PROMPT, msg);
-
 	fflush(stdout);
+
+	return 0;
 }
 
-static void send_chat_message(int socket_fd, ChatMessage *msg) {
+static int send_chat_message(int socket_fd, ChatMessage *msg) {
+	log_info("sending message");
+
 	PacketType packet_type = PacketTypeChatMessage;
 
-	send(socket_fd, &packet_type, sizeof(packet_type), 0);
-	send(socket_fd, &msg->size, sizeof(msg->size), 0);
-	send(socket_fd, msg->msg, strlen(msg->msg) + 1, 0);
+	if (send(socket_fd, &packet_type, sizeof(packet_type), 0) < 0) {
+		log_error(ERROR_NETWORK, "failed to send packet type");
+
+		return -1;
+	}
+
+	if (send(socket_fd, &msg->size, sizeof(msg->size), 0) < 0) {
+		log_error(ERROR_NETWORK, "failed to send message size");
+
+		return -1;
+	}
+
+	if (send(socket_fd, msg->msg, strlen(msg->msg) + 1, 0) < 0) {
+		log_error(ERROR_NETWORK, "failed to send message body");
+
+		return -1;
+	}
+
+	return 0;
 }
 
 // FIXME: resize terminal before closing results in no final newline
-static void resize_terminal() {
-	if (setup_ui() == 0) {
-		char null = INPUT_NULL;
-		ioctl(STDIN_FILENO, TIOCSTI, &null);
+static void resize_terminal_handler() {
+	log_info("received terminal resize signal");
+
+	switch (setup_ui()) {
+		case 0: {
+			char null = INPUT_NULL;
+
+			if (ioctl(STDIN_FILENO, TIOCSTI, &null) < 0) {
+				log_error(ERROR_TERMINAL, "failed to send fake (null) input trigger");
+			}
+
+			break;
+		}
+
+		// Terminal too small.
+		case 1:
+			break;
+
+		default:
+			log_error(ERROR_TERMINAL, "failed to setup UI");
 	}
 }
 
@@ -244,7 +303,12 @@ static void resize_terminal() {
  */
 static int setup_ui() {
 	struct winsize window_size;
-	ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size);
+
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) < 0) {
+		log_error(ERROR_TERMINAL, "failed to get terminal size");
+
+		return -1;
+	}
 
 	printf("%s", ANSI_CMD_CLEAR_SCREEN);
 
@@ -258,7 +322,7 @@ static int setup_ui() {
 
 		fflush(stdout);
 
-		return -1;
+		return 1;
 	}
 
 	for (int row_num = 1; row_num < window_size.ws_row - 1; row_num++) {
@@ -287,7 +351,11 @@ static int setup_ui() {
 
 	printf("\033[%u;%luH %s ", 10, window_size.ws_col - (CHAT_BOX_WIDTH / 2) - (strlen(CHAT_TITLE) / 2), CHAT_TITLE);
 
-	set_chat_message("");
+	if (set_chat_message("") < 0) {
+		log_error(ERROR_TERMINAL, "failed to reset chat message");
+
+		return -1;
+	}
 
 	return 0;
 }
@@ -301,6 +369,8 @@ static int configure_terminal(int signum) {
 	static struct termios old_term = {0};
 
 	if (signum < 0) {
+		log_info("setting up terminal");
+
 		if (tcgetattr(STDIN_FILENO, &old_term) < 0) {
 			log_error(ERROR_TERMINAL, "failed to get terminal attributes");
 
@@ -318,10 +388,15 @@ static int configure_terminal(int signum) {
 		}
 
 		printf("%s", ANSI_CMD_ENABLE_ALTERNATE_BUFFER);
-		fflush(stdout);
 
-		setup_ui();
+		if (setup_ui() < 0) {
+			log_error(ERROR_TERMINAL, "failed to setup UI");
+
+			return -1;
+		}
 	} else {
+		log_info("resetting terminal");
+
 		if (tcsetattr(STDIN_FILENO, TCSANOW, &old_term) < 0) {
 			log_error(ERROR_TERMINAL, "failed to set terminal attributes");
 
@@ -364,7 +439,7 @@ int main() {
 		log_error(ERROR_TERMINAL, "failed to set SIGTERM terminal reset signal");
 	}
 
-	struct sigaction resize_action = {.sa_flags = SA_RESTART, .sa_handler = resize_terminal};
+	struct sigaction resize_action = {.sa_flags = SA_RESTART, .sa_handler = resize_terminal_handler};
 
 	if (sigaction(SIGWINCH, &resize_action, NULL) < 0) {
 		log_error(ERROR_TERMINAL, "failed to set SIGWINCH terminal resize signal");
@@ -376,7 +451,7 @@ int main() {
 
 	pthread_t keyboard_thread;
 
-	if (pthread_create(&keyboard_thread, NULL, handle_keyboard, &socket_fd) != 0) {
+	if (pthread_create(&keyboard_thread, NULL, keyboard_handler, &socket_fd) != 0) {
 		log_fatal(ERROR_THREAD, "failed to start keyboard listening thread");
 	}
 
@@ -392,9 +467,22 @@ int main() {
 			PacketType packet_type = PacketTypeHeartbeat;
 			heartbeat.status = HeartbeatStatusPong;
 
-			send(socket_fd, &packet_type, sizeof(packet_type), 0);
-			send(socket_fd, &heartbeat, sizeof(heartbeat), 0);
+			n = send(socket_fd, &packet_type, sizeof(packet_type), 0);
+
+			if (n <= 0) {
+				break;
+			}
+
+			n = send(socket_fd, &heartbeat, sizeof(heartbeat), 0);
+
+			if (n <= 0) {
+				break;
+			}
 		}
+	}
+
+	if (close(socket_fd) < 0) {
+		log_error(ERROR_NETWORK, "failed to disconnect from server");
 	}
 
 	if (reset_terminal() < 0) {

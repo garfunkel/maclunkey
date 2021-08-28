@@ -2,6 +2,10 @@ project('maclunkey', 'c',
 	version: '0.1',
 	default_options: ['c_std=c11', 'warning_level=3'])
 
+if get_option('buildtype').startswith('debug')
+	add_project_arguments('-DDEBUG', language: 'c')
+endif
+
 #imageMagick = dependency('MagickWand', version: '>=7.0.0')
 
 executable('server',
