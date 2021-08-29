@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -18,6 +19,11 @@
 
 #define setup_terminal() configure_terminal(-1)
 #define reset_terminal() configure_terminal(0)
+
+typedef struct {
+	int socket_fd;
+	pthread_mutex_t socket_lock;
+} Server;
 
 /*
  * Buffer for chat message which is yet to be sent.
@@ -33,17 +39,18 @@ static void resize_terminal_handler();
 static int setup_ui();
 static void *keyboard_handler(void *arg);
 static int set_chat_message(const char *msg);
-static int send_chat_message(int socket_fd, ChatMessage *msg);
+static int send_chat_message(Server *server, ChatMessage *msg);
+static int config_handler(Server *server);
+static int handle_heartbeat(Server *server);
 
 static void *keyboard_handler(void *arg) {
-	int socket_fd = *(int *)arg;
+	Server *server = (Server *)arg;
 	ChatBuffer chat_buffer = {0};
 
 	while (TRUE) {
 		int ch = 0;
-		int n = read(STDIN_FILENO, &ch, sizeof ch);
 
-		if (n <= 0) {
+		if (read(STDIN_FILENO, &ch, sizeof ch) <= 0) {
 			break;
 		}
 
@@ -87,7 +94,7 @@ static void *keyboard_handler(void *arg) {
 				break;
 
 			case INPUT_ESCAPE:
-				if (close(socket_fd) < 0) {
+				if (close(server->socket_fd) < 0) {
 					log_error(ERROR_NETWORK, "failed to disconnect from server");
 				}
 
@@ -174,7 +181,7 @@ static void *keyboard_handler(void *arg) {
 			case INPUT_LINE_FEED: {
 				ChatMessage msg = {.size = strlen(chat_buffer.msg) + 1, .msg = chat_buffer.msg};
 
-				if (send_chat_message(socket_fd, &msg) < 0) {
+				if (send_chat_message(server, &msg) < 0) {
 					log_error(ERROR_NETWORK, "failed to send message");
 				}
 
@@ -238,7 +245,7 @@ static void *keyboard_handler(void *arg) {
 		fflush(stdout);
 	}
 
-	if (close(socket_fd) < 0) {
+	if (close(server->socket_fd) < 0) {
 		log_error(ERROR_NETWORK, "failed to disconnect from server");
 	}
 
@@ -260,24 +267,24 @@ static int set_chat_message(const char *msg) {
 	return 0;
 }
 
-static int send_chat_message(int socket_fd, ChatMessage *msg) {
+static int send_chat_message(Server *server, ChatMessage *msg) {
 	log_info("sending message");
 
 	PacketType packet_type = PacketTypeChatMessage;
 
-	if (send(socket_fd, &packet_type, sizeof packet_type, 0) < 0) {
+	if (send(server->socket_fd, &packet_type, sizeof packet_type, 0) < 0) {
 		log_error(ERROR_NETWORK, "failed to send packet type");
 
 		return -1;
 	}
 
-	if (send(socket_fd, &msg->size, sizeof msg->size, 0) < 0) {
+	if (send(server->socket_fd, &msg->size, sizeof msg->size, 0) < 0) {
 		log_error(ERROR_NETWORK, "failed to send message size");
 
 		return -1;
 	}
 
-	if (send(socket_fd, msg->msg, strlen(msg->msg) + 1, 0) < 0) {
+	if (send(server->socket_fd, msg->msg, strlen(msg->msg), 0) < 0) {
 		log_error(ERROR_NETWORK, "failed to send message body");
 
 		return -1;
@@ -399,7 +406,7 @@ static int configure_terminal(int signum) {
 			return -1;
 		}
 
-		printf("%s", ANSI_CMD_ENABLE_ALTERNATE_BUFFER);
+		// printf("%s", ANSI_CMD_ENABLE_ALTERNATE_BUFFER);
 
 		if (setup_ui() < 0) {
 			log_error(ERROR_TERMINAL, "failed to setup UI");
@@ -415,33 +422,123 @@ static int configure_terminal(int signum) {
 			return -1;
 		}
 
-		printf("%s", ANSI_CMD_DISABLE_ALTERNATE_BUFFER);
+		// printf("%s", ANSI_CMD_DISABLE_ALTERNATE_BUFFER);
 		fflush(stdout);
 	}
 
 	return 0;
 }
 
-int main() {
-	struct sockaddr_in server = {0};
-	server.sin_family = AF_INET;
+static int config_handler(Server *server) {
+	Config *config = calloc(1, sizeof *config);
 
-	if (inet_pton(AF_INET, "localhost", &server.sin_addr) < 0) {
+	if (recv(server->socket_fd, &config->num_rooms, sizeof config->num_rooms, 0) < 0) {
+		log_error(ERROR_NETWORK, "failed to receive configuration");
+
+		return -1;
+	}
+
+	// TODO: security issue - server could send stupid number, result in DoS/memory attack
+	// institute max number of rooms.
+	config->rooms = calloc(config->num_rooms, sizeof *config->rooms);
+
+	for (size_t i = 0; i < config->num_rooms; i++) {
+		size_t len = 0;
+
+		if (recv(server->socket_fd, &len, sizeof len, 0) < 0) {
+			log_error(ERROR_NETWORK, "failed to receive room name length");
+
+			return -1;
+		}
+
+		config->rooms[i].name = calloc(1, len + 1);
+
+		if (recv(server->socket_fd, config->rooms[i].name, len, 0) < 0) {
+			log_error(ERROR_NETWORK, "failed to receive room name");
+
+			return -1;
+		}
+
+		if (recv(server->socket_fd, &len, sizeof len, 0) < 0) {
+			log_error(ERROR_NETWORK, "failed to receive room description length");
+
+			return -1;
+		}
+
+		config->rooms[i].desc = calloc(1, len + 1);
+
+		if (recv(server->socket_fd, config->rooms[i].desc, len, 0) < 0) {
+			log_error(ERROR_NETWORK, "failed to receive room description");
+
+			return -1;
+		}
+	}
+
+	printf("%s%s", ANSI_CMD_CLEAR_SCREEN, ANSI_CMD_CURSOR_RESET);
+	printf("Select room:\n");
+
+	for (size_t i = 0; i < config->num_rooms; i++) {
+		printf("%s - %s\n", config->rooms[i].name, config->rooms[i].desc);
+	}
+
+	fflush(stdout);
+
+	return 0;
+}
+
+int handle_heartbeat(Server *server) {
+	Heartbeat heartbeat;
+	int n = 0;
+
+	if ((n = recv(server->socket_fd, &heartbeat, sizeof heartbeat, 0)) == 0) {
+		return 0;
+	} else if (n < 0) {
+		log_error(ERROR_NETWORK, "failed to receive ping");
+
+		return -1;
+	}
+
+	if (heartbeat.status == HeartbeatStatusPing) {
+		PacketType packet_type = PacketTypeHeartbeat;
+		heartbeat.status = HeartbeatStatusPong;
+
+		if (send(server->socket_fd, &packet_type, sizeof packet_type, 0) < 0) {
+			log_error(ERROR_NETWORK, "failed to send packet type");
+
+			return -1;
+		}
+
+		if (send(server->socket_fd, &heartbeat, sizeof heartbeat, 0) < 0) {
+			log_error(ERROR_NETWORK, "failed to send pong");
+
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+int main() {
+	struct sockaddr_in server_addr = {.sin_family = AF_INET, .sin_port = htons(5000)};
+
+	if (inet_pton(AF_INET, "localhost", &server_addr.sin_addr) < 0) {
 		log_fatal(ERROR_NETWORK, "failed to parse IP address");
 	}
 
-	server.sin_port = htons(5000);
-	int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+	Server server = {.socket_fd = socket(AF_INET, SOCK_STREAM, 0), .socket_lock = PTHREAD_MUTEX_INITIALIZER};
 
-	if (socket_fd < 0) {
+	if (server.socket_fd < 0) {
 		log_fatal(ERROR_NETWORK, "failed to construct socket");
 	}
 
-	if (connect(socket_fd, (struct sockaddr *)&server, sizeof server) < 0) {
+	if (connect(server.socket_fd, (struct sockaddr *)&server_addr, sizeof server_addr) < 0) {
 		log_fatal(ERROR_NETWORK, "failed to connect to server");
 	}
 
-	struct sigaction reset_action = {.sa_handler = (void (*)(int))configure_terminal};
+	// FIXME: we need to catch SIGTERM and SIGINT to avoid abort()
+	// but we don't want to do anything with it because it will interrupt send/recv
+	// anyway, which results in clean shutdown anyway.... hmmm....
+	struct sigaction reset_action = {.sa_handler = do_nothing /*(void (*)(int))configure_terminal*/};
 
 	if (sigaction(SIGINT, &reset_action, NULL) < 0) {
 		log_error(ERROR_TERMINAL, "failed to set SIGINT terminal reset signal");
@@ -457,45 +554,51 @@ int main() {
 		log_error(ERROR_TERMINAL, "failed to set SIGWINCH terminal resize signal");
 	}
 
-	// get room
-
 	if (setup_terminal() < 0) {
 		log_fatal(ERROR_TERMINAL, "failed to setup terminal");
 	}
 
 	pthread_t keyboard_thread;
 
-	if (pthread_create(&keyboard_thread, NULL, keyboard_handler, &socket_fd) != 0) {
+	if (pthread_create(&keyboard_thread, NULL, keyboard_handler, &server) != 0) {
 		log_fatal(ERROR_THREAD, "failed to start keyboard listening thread");
 	}
 
 	while (TRUE) {
-		Heartbeat heartbeat;
-		int n = recv(socket_fd, &heartbeat, sizeof heartbeat, 0);
+		PacketType packet_type;
+		int n = 0;
 
-		if (n <= 0) {
+		if ((n = recv(server.socket_fd, &packet_type, sizeof packet_type, 0)) == 0) {
+			break;
+		} else if (n < 0) {
+			// If EINTR received something like SIGINT was received.
+			if (errno != EINTR) {
+				log_error(ERROR_NETWORK, "failed to receive packet type");
+			}
+
 			break;
 		}
 
-		if (heartbeat.status == HeartbeatStatusPing) {
-			PacketType packet_type = PacketTypeHeartbeat;
-			heartbeat.status = HeartbeatStatusPong;
+		switch (packet_type) {
+			case PacketTypeHeartbeat: {
+				handle_heartbeat(&server);
 
-			n = send(socket_fd, &packet_type, sizeof packet_type, 0);
-
-			if (n <= 0) {
 				break;
 			}
 
-			n = send(socket_fd, &heartbeat, sizeof heartbeat, 0);
+			case PacketTypeConfig: {
+				log_info("received config");
 
-			if (n <= 0) {
+				config_handler(&server);
+
 				break;
 			}
+
+			default:;
 		}
 	}
 
-	if (close(socket_fd) < 0) {
+	if (close(server.socket_fd) < 0) {
 		log_error(ERROR_NETWORK, "failed to disconnect from server");
 	}
 

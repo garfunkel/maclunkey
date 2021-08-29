@@ -4,16 +4,21 @@
 #include "utils.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static void *heartbeat_handler(void *arg);
 static void *client_handler(void *arg);
+static Config *read_config();
+static int send_config(const Client *client, const Config *config);
 
 static void *heartbeat_handler(void *arg) {
 	Client *client = (Client *)arg;
@@ -24,24 +29,47 @@ static void *heartbeat_handler(void *arg) {
 	}
 
 	while (TRUE) {
+		PacketType packet_type = PacketTypeHeartbeat;
 		client->heartbeat_status = HeartbeatStatusPing;
 
-		if (send(client->socket_fd, &client->heartbeat_status, sizeof client->heartbeat_status, 0) < 0) {
+		pthread_mutex_lock(&client->socket_lock);
+
+		if (send(client->socket_fd, &packet_type, sizeof packet_type, 0) < 0) {
+			pthread_mutex_unlock(&client->socket_lock);
+
+			log_error(ERROR_HEARTBEAT, "failed to send packet type");
+
 			break;
 		}
+
+		if (send(client->socket_fd, &client->heartbeat_status, sizeof client->heartbeat_status, 0) < 0) {
+			pthread_mutex_unlock(&client->socket_lock);
+
+			log_error(ERROR_HEARTBEAT, "failed to send packet type");
+
+			break;
+		}
+
+		pthread_mutex_unlock(&client->socket_lock);
 
 		// Wait for client_handler to receive pong.
 		sleep(HEARTBEAT_INTERVAL);
 
 		if (client->heartbeat_status != HeartbeatStatusPong) {
+			pthread_mutex_lock(&client->socket_lock);
+
 			// Check if client has already disconnected.
 			if (send(client->socket_fd, NULL, 0, 0) < 0) {
 				if (errno == EBADF) {
+					pthread_mutex_unlock(&client->socket_lock);
+
 					break;
 				} else {
 					log_error(ERROR_HEARTBEAT, "failed to check status of client");
 				}
 			}
+
+			pthread_mutex_unlock(&client->socket_lock);
 
 			log_error(ERROR_HEARTBEAT, "client has not responsed to last ping with a pong");
 
@@ -56,13 +84,194 @@ static void *heartbeat_handler(void *arg) {
 	return NULL;
 }
 
+static Config *read_config() {
+	char *home_dir = get_home_dir();
+
+	if (home_dir == NULL) {
+		log_error(ERROR_OS, "failed to get home directory");
+
+		return NULL;
+	}
+
+	char *config_path = join_path(home_dir, CONFIG_PATH, NULL);
+	char *dir = NULL;
+
+	for (size_t i = 1; i < strlen(config_path); i++) {
+		if (config_path[i] == PATH_SEPARATOR) {
+			if (dir != NULL) {
+				free(dir);
+			}
+
+			dir = strndup(config_path, i);
+
+			if (mkdir(dir, 0777) < 0 && errno != EEXIST) {
+				log_error(ERROR_CONFIG, "failed to create config directory");
+
+				freep(&dir);
+
+				return NULL;
+			}
+		}
+	}
+
+	freep(&dir);
+
+	int config_fd = open(config_path, O_RDONLY | O_CREAT | O_SYMLINK, 0666);
+
+	if (config_fd < 0) {
+		log_error(ERROR_CONFIG, "failed to create/open configuration file");
+
+		return NULL;
+	}
+
+	freep(&config_path);
+
+	FILE *config_file = fdopen(config_fd, "r");
+
+	if (config_file == NULL) {
+		log_error(ERROR_CONFIG, "failed to open configuration file stream");
+
+		return NULL;
+	}
+
+	Config *config = calloc(1, sizeof *config);
+	char *line = NULL;
+	size_t cap = 0;
+	ssize_t n = 0;
+	ConfigSection section = ConfigSectionGlobal;
+
+	while ((n = getline(&line, &cap, config_file)) > 0) {
+		char *stripped = strip_whitespace(line);
+
+		if (stripped[0] == CONFIG_COMMENT || strlen(stripped) == 0) {
+			continue;
+		}
+
+		if (stripped[0] == CONFIG_SECTION_START && stripped[strlen(stripped) - 1] == CONFIG_SECTION_END) {
+			if (strncasecmp(stripped + 1, "rooms", strlen(stripped) - 2) == 0) {
+				section = ConfigSectionRooms;
+			}
+		} else {
+			char *key = stripped;
+			char *value = NULL;
+
+			for (size_t i = 0; i < strlen(stripped); i++) {
+				if (stripped[i] == '=') {
+					stripped[i] = '\0';
+					value = &stripped[i + 1];
+
+					break;
+				}
+			}
+
+			config->rooms = realloc(config->rooms, sizeof *config->rooms * (config->num_rooms + 1));
+			config->rooms[config->num_rooms].name = strdup(key);
+			config->rooms[config->num_rooms].desc = strdup(value);
+			config->num_rooms++;
+		}
+
+		freep(&stripped);
+	}
+
+	freep(&line);
+
+	if (ferror(config_file) != 0) {
+		log_error(ERROR_CONFIG, "failed to read lines from configuration file");
+
+		if (fclose(config_file) != 0) {
+			log_error(ERROR_CONFIG, "failed to close configuration file stream");
+		}
+
+		return NULL;
+	}
+
+	if (fclose(config_file) != 0) {
+		log_error(ERROR_CONFIG, "failed to close configuration file stream");
+	}
+
+	return config;
+}
+
+static int send_config(const Client *client, const Config *config) {
+	PacketType packet_type = PacketTypeConfig;
+
+	pthread_mutex_lock(&client->socket_lock);
+
+	if (send(client->socket_fd, &packet_type, sizeof packet_type, 0) < 0) {
+		pthread_mutex_unlock(&client->socket_lock);
+
+		log_error(ERROR_NETWORK, "failed to send packet type");
+
+		return -1;
+	}
+
+	if (send(client->socket_fd, &config->num_rooms, sizeof config->num_rooms, 0) < 0) {
+		pthread_mutex_unlock(&client->socket_lock);
+
+		log_error(ERROR_NETWORK, "failed to send number of rooms");
+
+		return -1;
+	}
+
+	for (size_t i = 0; i < config->num_rooms; i++) {
+		size_t len = strlen(config->rooms[i].name);
+
+		if (send(client->socket_fd, &len, sizeof len, 0) < 0) {
+			pthread_mutex_unlock(&client->socket_lock);
+
+			log_error(ERROR_NETWORK, "failed to send room name length");
+
+			return -1;
+		}
+
+		if (send(client->socket_fd, config->rooms[i].name, len, 0) < 0) {
+			pthread_mutex_unlock(&client->socket_lock);
+
+			log_error(ERROR_NETWORK, "failed to send room name");
+
+			return -1;
+		}
+
+		len = strlen(config->rooms[i].desc);
+
+		if (send(client->socket_fd, &len, sizeof len, 0) < 0) {
+			pthread_mutex_unlock(&client->socket_lock);
+
+			log_error(ERROR_NETWORK, "failed to send room description length");
+
+			return -1;
+		}
+
+		if (send(client->socket_fd, config->rooms[i].desc, len, 0) < 0) {
+			pthread_mutex_unlock(&client->socket_lock);
+
+			log_error(ERROR_NETWORK, "failed to send room description");
+
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
 static void *client_handler(void *arg) {
-	Client client = {.socket_fd = *(int *)arg};
+	Client client = {.socket_fd = *(int *)arg, .socket_lock = PTHREAD_MUTEX_INITIALIZER};
 
 	log_info("connected to client");
 
 	if (pthread_create(&client.heartbeat_thread, NULL, heartbeat_handler, &client) != 0) {
 		log_fatal(ERROR_THREAD, "failed to create client heartbeat thread");
+	}
+
+	// get rooms, send rooms
+	Config *config = read_config();
+
+	if (config == NULL) {
+		log_error(ERROR_CONFIG, "failed to read configuration file");
+	}
+
+	if (send_config(&client, config) < 0) {
+		log_error(ERROR_CONFIG, "failed to send configuration to client");
 	}
 
 	while (TRUE) {
@@ -109,7 +318,7 @@ static void *client_handler(void *arg) {
 				break;
 			}
 
-			msg.msg = calloc(1, msg.size);
+			msg.msg = calloc(1, msg.size + 1);
 			n = recv(client.socket_fd, msg.msg, msg.size, 0);
 
 			if (n < 1) {
@@ -146,7 +355,8 @@ int main() {
 		log_fatal(ERROR_NETWORK, "failed to construct socket");
 	}
 
-	struct sockaddr_in server = {.sin_family = AF_INET, .sin_port = htons(5000), .sin_addr.s_addr = htonl(INADDR_ANY)};
+	struct sockaddr_in server_addr = {
+	    .sin_family = AF_INET, .sin_port = htons(5000), .sin_addr.s_addr = htonl(INADDR_ANY)};
 
 	int opt_val = TRUE;
 
@@ -154,7 +364,7 @@ int main() {
 		log_fatal(ERROR_NETWORK, "failed to set socket options");
 	}
 
-	if (bind(server_fd, (struct sockaddr *)&server, sizeof server) < 0) {
+	if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof server_addr) < 0) {
 		log_fatal(ERROR_NETWORK, "failed to bind to socket");
 	}
 

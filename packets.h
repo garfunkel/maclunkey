@@ -4,6 +4,7 @@
 
 typedef enum
 {
+	PacketTypeConfig,
 	PacketTypeStatusUpdate,
 	PacketTypeHeartbeat,
 	PacketTypeChatMessage,

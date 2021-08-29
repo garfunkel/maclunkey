@@ -72,5 +72,6 @@ const char *ANSI_CMD_ENABLE_ALTERNATE_BUFFER = "\033[?1049h";
 const char *ANSI_CMD_DISABLE_ALTERNATE_BUFFER = "\033[?1049l";
 const char *ANSI_CMD_CLEAR_SCREEN = "\033[2J";
 const char *ANSI_CMD_CLEAR_LINE = "\033[0K";
+const char *ANSI_CMD_CURSOR_RESET = "\033[H";
 const char *ANSI_CMD_CURSOR_LEFT = "\033[1D";
 const char *ANSI_CMD_CURSOR_RIGHT = "\033[1C";

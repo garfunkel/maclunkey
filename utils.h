@@ -1,9 +1,15 @@
 #pragma once
 
+#include <stddef.h>
+
+#define APP_NAME "maclunkey"
 #define FALSE 0
 #define TRUE 1
 #define MAX_PARTICIPANTS 8
 #define HEARTBEAT_INTERVAL 5
+#define PATH_SEPARATOR '/'
+#define ENV_HOME "HOME"
+#define CONFIG_PATH ".config/" APP_NAME "/" APP_NAME ".config"
 
 #define log_error_x(type, id, err) \
 	fprintf(stderr, "%s: %s:%s:%d: %s: %s\n", type, __FILE__, __func__, __LINE__, error_to_string(id), err)
@@ -50,7 +56,27 @@
                    \
 	*ptr = NULL
 
+typedef struct {
+	char *name;
+	char *desc;
+} Room;
+
+typedef struct {
+	size_t num_rooms;
+	Room *rooms;
+} Config;
+
+typedef enum
+{
+	ConfigSectionGlobal,
+	ConfigSectionRooms
+} ConfigSection;
+
 /*
  * Placeholder function that does nothing on purpose.
  */
 void do_nothing();
+
+char *get_home_dir();
+char *join_path(const char *path, ...);
+char *strip_whitespace(const char *string);
