@@ -6,14 +6,17 @@ if get_option('buildtype').startswith('debug')
 	add_project_arguments('-DDEBUG', language: 'c')
 endif
 
+add_project_arguments('-D_GNU_SOURCE', language: 'c')
+
+dependencies = dependency('threads')
 #imageMagick = dependency('MagickWand', version: '>=7.0.0')
 
 executable('server',
 	['server.c', 'utils.c'],
-	#dependencies: imageMagick,
+	dependencies: dependencies,
 	install: true)
 
 executable('client',
 	['client.c', 'utils.c'],
-	#dependencies: imageMagick,
+	dependencies: dependencies,
 	install: true)

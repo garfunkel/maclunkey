@@ -116,7 +116,11 @@ static Config *read_config() {
 
 	freep(&dir);
 
+#ifdef __APPLE__
 	int config_fd = open(config_path, O_RDONLY | O_CREAT | O_SYMLINK, 0666);
+#else
+	int config_fd = open(config_path, O_RDONLY | O_CREAT, 0666);
+#endif
 
 	if (config_fd < 0) {
 		log_error(ERROR_CONFIG, "failed to create/open configuration file");
