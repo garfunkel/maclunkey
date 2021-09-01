@@ -89,3 +89,7 @@ void do_nothing();
 char *get_home_dir();
 char *join_path(const char *path, ...);
 char *strip_whitespace(const char *string);
+
+#ifdef __APPLE__
+	#define mempcpy(dest, src, n) (char *)memcpy(dest, src, n) + n;
+#endif
