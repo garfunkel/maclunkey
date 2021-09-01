@@ -19,7 +19,9 @@ typedef enum
 {
 	HeartbeatStatusPing,
 	HeartbeatStatusPong
-} HeartbeatStatus;
+} _HeartbeatStatus;
+
+typedef uint8_t HeartbeatStatus;
 
 typedef struct {
 	char *name;
