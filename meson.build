@@ -12,11 +12,11 @@ dependencies = dependency('threads')
 #imageMagick = dependency('MagickWand', version: '>=7.0.0')
 
 executable('server',
-	['server.c', 'utils.c'],
+	['server.c', 'packets.c', 'utils.c'],
 	dependencies: dependencies,
 	install: true)
 
 executable('client',
-	['client.c', 'utils.c'],
+	['client.c', 'packets.c', 'utils.c'],
 	dependencies: dependencies,
 	install: true)

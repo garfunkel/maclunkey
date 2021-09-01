@@ -66,7 +66,7 @@ static void *keyboard_handler(void *arg) {
 
 		if (window_size.ws_col < MIN_WINDOW_WIDTH || window_size.ws_row < MIN_WINDOW_HEIGHT) {
 			continue;
-		} else if (chat_buffer.size != window_size.ws_col - 5) {
+		} else if (chat_buffer.size != (unsigned int)window_size.ws_col - 5) {
 			chat_buffer.msg = realloc(chat_buffer.msg, window_size.ws_col - 5);
 			unsigned int new_size = window_size.ws_col - 5;
 
@@ -179,9 +179,7 @@ static void *keyboard_handler(void *arg) {
 				break;
 
 			case INPUT_LINE_FEED: {
-				ChatMessage msg = {.size = strlen(chat_buffer.msg) + 1, .msg = chat_buffer.msg};
-
-				if (send_chat_message(server, &msg) < 0) {
+				if (send_chat_message(server, chat_buffer.msg) < 0) {
 					log_error(ERROR_NETWORK, "failed to send message");
 				}
 
@@ -270,25 +268,17 @@ static int set_chat_message(const char *msg) {
 static int send_chat_message(Server *server, ChatMessage *msg) {
 	log_info("sending message");
 
-	PacketType packet_type = PacketTypeChatMessage;
+	Serialised *serialised = serialise_chat_message(msg);
 
-	if (send(server->socket_fd, &packet_type, sizeof packet_type, 0) < 0) {
-		log_error(ERROR_NETWORK, "failed to send packet type");
+	if (send_packet(server->socket_fd, serialised, &server->socket_lock) < 0) {
+		log_error(ERROR_NETWORK, "failed to send chat message");
 
-		return -1;
-	}
-
-	if (send(server->socket_fd, &msg->size, sizeof msg->size, 0) < 0) {
-		log_error(ERROR_NETWORK, "failed to send message size");
+		free(serialised);
 
 		return -1;
 	}
 
-	if (send(server->socket_fd, msg->msg, strlen(msg->msg), 0) < 0) {
-		log_error(ERROR_NETWORK, "failed to send message body");
-
-		return -1;
-	}
+	free(serialised);
 
 	return 0;
 }
@@ -386,6 +376,7 @@ static int setup_ui() {
  */
 static int configure_terminal(int signum) {
 	static struct termios old_term = {0};
+	static int configured = FALSE;
 
 	if (signum < 0) {
 		log_info("setting up terminal");
@@ -396,6 +387,7 @@ static int configure_terminal(int signum) {
 			return -1;
 		}
 
+		configured = TRUE;
 		struct termios new_term = {0};
 		memcpy(&new_term, &old_term, sizeof old_term);
 		new_term.c_lflag &= ~ECHO & ~ICANON;
@@ -406,14 +398,14 @@ static int configure_terminal(int signum) {
 			return -1;
 		}
 
-		// printf("%s", ANSI_CMD_ENABLE_ALTERNATE_BUFFER);
+		printf("%s", ANSI_CMD_ENABLE_ALTERNATE_BUFFER);
 
 		if (setup_ui() < 0) {
 			log_error(ERROR_TERMINAL, "failed to setup UI");
 
 			return -1;
 		}
-	} else {
+	} else if (configured) {
 		log_info("resetting terminal");
 
 		if (tcsetattr(STDIN_FILENO, TCSANOW, &old_term) < 0) {
@@ -422,57 +414,26 @@ static int configure_terminal(int signum) {
 			return -1;
 		}
 
-		// printf("%s", ANSI_CMD_DISABLE_ALTERNATE_BUFFER);
+		printf("%s", ANSI_CMD_DISABLE_ALTERNATE_BUFFER);
 		fflush(stdout);
+	} else {
+		log_info("terminal not configured, no need for resetting");
 	}
 
 	return 0;
 }
 
 static int config_handler(Server *server) {
-	Config *config = calloc(1, sizeof *config);
+	Serialised serialised = {0};
+	int ret = recv_packet(server->socket_fd, &serialised, &server->socket_lock);
 
-	if (recv(server->socket_fd, &config->num_rooms, sizeof config->num_rooms, 0) < 0) {
+	if (ret < 0) {
 		log_error(ERROR_NETWORK, "failed to receive configuration");
 
-		return -1;
+		return ret;
 	}
 
-	// TODO: security issue - server could send stupid number, result in DoS/memory attack
-	// institute max number of rooms.
-	config->rooms = calloc(config->num_rooms, sizeof *config->rooms);
-
-	for (size_t i = 0; i < config->num_rooms; i++) {
-		size_t len = 0;
-
-		if (recv(server->socket_fd, &len, sizeof len, 0) < 0) {
-			log_error(ERROR_NETWORK, "failed to receive room name length");
-
-			return -1;
-		}
-
-		config->rooms[i].name = calloc(1, len + 1);
-
-		if (recv(server->socket_fd, config->rooms[i].name, len, 0) < 0) {
-			log_error(ERROR_NETWORK, "failed to receive room name");
-
-			return -1;
-		}
-
-		if (recv(server->socket_fd, &len, sizeof len, 0) < 0) {
-			log_error(ERROR_NETWORK, "failed to receive room description length");
-
-			return -1;
-		}
-
-		config->rooms[i].desc = calloc(1, len + 1);
-
-		if (recv(server->socket_fd, config->rooms[i].desc, len, 0) < 0) {
-			log_error(ERROR_NETWORK, "failed to receive room description");
-
-			return -1;
-		}
-	}
+	Config *config = unserialise_config(&serialised);
 
 	printf("%s%s", ANSI_CMD_CLEAR_SCREEN, ANSI_CMD_CURSOR_RESET);
 	printf("Select room:\n");
@@ -483,37 +444,45 @@ static int config_handler(Server *server) {
 
 	fflush(stdout);
 
+	free(config);
+
 	return 0;
 }
 
 int handle_heartbeat(Server *server) {
-	Heartbeat heartbeat;
-	int n = 0;
+	Serialised serialised = {0};
+	int ret = recv_packet(server->socket_fd, &serialised, &server->socket_lock);
 
-	if ((n = recv(server->socket_fd, &heartbeat, sizeof heartbeat, 0)) == 0) {
+	if (ret < 0) {
+		log_error(ERROR_NETWORK, "failed to receive heartbeat ping");
+
+		return ret;
+	} else if (ret == 0) {
 		return 0;
-	} else if (n < 0) {
-		log_error(ERROR_NETWORK, "failed to receive ping");
+	}
+
+	Heartbeat *heartbeat = unserialise_heartbeat(&serialised);
+
+	if (*heartbeat != HeartbeatStatusPing) {
+		log_error(ERROR_NETWORK, "heartbeat from server was not a ping... this is awkward...");
 
 		return -1;
 	}
 
-	if (heartbeat.status == HeartbeatStatusPing) {
-		PacketType packet_type = PacketTypeHeartbeat;
-		heartbeat.status = HeartbeatStatusPong;
+	*heartbeat = HeartbeatStatusPong;
+	Serialised *send_serialised = serialise_heartbeat(heartbeat);
 
-		if (send(server->socket_fd, &packet_type, sizeof packet_type, 0) < 0) {
-			log_error(ERROR_NETWORK, "failed to send packet type");
+	free(heartbeat);
 
-			return -1;
-		}
+	if (send_packet(server->socket_fd, send_serialised, &server->socket_lock) < 0) {
+		free(send_serialised);
 
-		if (send(server->socket_fd, &heartbeat, sizeof heartbeat, 0) < 0) {
-			log_error(ERROR_NETWORK, "failed to send pong");
+		log_error(ERROR_NETWORK, "failed to send pong");
 
-			return -1;
-		}
+		return -1;
 	}
+
+	free(send_serialised);
 
 	return 0;
 }
@@ -568,7 +537,9 @@ int main() {
 		PacketType packet_type;
 		int n = 0;
 
-		if ((n = recv(server.socket_fd, &packet_type, sizeof packet_type, 0)) == 0) {
+		if ((n = recv(server.socket_fd, &packet_type, sizeof packet_type, MSG_PEEK)) == 0) {
+			log_info("server disconnected");
+
 			break;
 		} else if (n < 0) {
 			// If EINTR received something like SIGINT was received.

@@ -52,19 +52,9 @@
 #endif
 
 #define freep(ptr) \
-	free(*ptr);    \
+	free(ptr);     \
                    \
-	*ptr = NULL
-
-typedef struct {
-	char *name;
-	char *desc;
-} Room;
-
-typedef struct {
-	size_t num_rooms;
-	Room *rooms;
-} Config;
+	ptr = NULL
 
 typedef enum
 {

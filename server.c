@@ -29,31 +29,20 @@ static void *heartbeat_handler(void *arg) {
 	}
 
 	while (TRUE) {
-		PacketType packet_type = PacketTypeHeartbeat;
+		Heartbeat heartbeat = HeartbeatStatusPing;
+		Serialised *serialised = serialise_heartbeat(&heartbeat);
 		client->heartbeat_status = HeartbeatStatusPing;
 
-		pthread_mutex_lock(&client->socket_lock);
-
-		if (send(client->socket_fd, &packet_type, sizeof packet_type, 0) < 0) {
-			pthread_mutex_unlock(&client->socket_lock);
-
+		if (send_packet(client->socket_fd, serialised, &client->socket_lock) < 0) {
 			log_error(ERROR_HEARTBEAT, "failed to send packet type");
 
 			break;
 		}
 
-		if (send(client->socket_fd, &client->heartbeat_status, sizeof client->heartbeat_status, 0) < 0) {
-			pthread_mutex_unlock(&client->socket_lock);
-
-			log_error(ERROR_HEARTBEAT, "failed to send packet type");
-
+		// Wait for client_handler to receive pong. May be interrupted if told to finish up.
+		if (sleep(HEARTBEAT_INTERVAL) != 0) {
 			break;
 		}
-
-		pthread_mutex_unlock(&client->socket_lock);
-
-		// Wait for client_handler to receive pong.
-		sleep(HEARTBEAT_INTERVAL);
 
 		if (client->heartbeat_status != HeartbeatStatusPong) {
 			pthread_mutex_lock(&client->socket_lock);
@@ -71,7 +60,7 @@ static void *heartbeat_handler(void *arg) {
 
 			pthread_mutex_unlock(&client->socket_lock);
 
-			log_error(ERROR_HEARTBEAT, "client has not responsed to last ping with a pong");
+			log_error(ERROR_HEARTBEAT, "client has not responded to last ping with a pong");
 
 			if (shutdown(client->socket_fd, SHUT_RDWR) < 0) {
 				log_error(ERROR_NETWORK, "failed to disconnect from client");
@@ -107,14 +96,14 @@ static Config *read_config() {
 			if (mkdir(dir, 0777) < 0 && errno != EEXIST) {
 				log_error(ERROR_CONFIG, "failed to create config directory");
 
-				freep(&dir);
+				freep(dir);
 
 				return NULL;
 			}
 		}
 	}
 
-	freep(&dir);
+	freep(dir);
 
 #ifdef __APPLE__
 	int config_fd = open(config_path, O_RDONLY | O_CREAT | O_SYMLINK, 0666);
@@ -128,7 +117,7 @@ static Config *read_config() {
 		return NULL;
 	}
 
-	freep(&config_path);
+	freep(config_path);
 
 	FILE *config_file = fdopen(config_fd, "r");
 
@@ -168,16 +157,18 @@ static Config *read_config() {
 				}
 			}
 
-			config->rooms = realloc(config->rooms, sizeof *config->rooms * (config->num_rooms + 1));
-			config->rooms[config->num_rooms].name = strdup(key);
-			config->rooms[config->num_rooms].desc = strdup(value);
-			config->num_rooms++;
+			if (section == ConfigSectionRooms) {
+				config->rooms = realloc(config->rooms, sizeof *config->rooms * (config->num_rooms + 1));
+				config->rooms[config->num_rooms].name = strdup(key);
+				config->rooms[config->num_rooms].desc = strdup(value);
+				config->num_rooms++;
+			}
 		}
 
-		freep(&stripped);
+		freep(stripped);
 	}
 
-	freep(&line);
+	freep(line);
 
 	if (ferror(config_file) != 0) {
 		log_error(ERROR_CONFIG, "failed to read lines from configuration file");
@@ -197,62 +188,14 @@ static Config *read_config() {
 }
 
 static int send_config(const Client *client, const Config *config) {
-	PacketType packet_type = PacketTypeConfig;
+	Serialised *serialised = serialise_config(config);
 
-	pthread_mutex_lock(&client->socket_lock);
+	int n = send_packet(client->socket_fd, serialised, (pthread_mutex_t *)&client->socket_lock);
 
-	if (send(client->socket_fd, &packet_type, sizeof packet_type, 0) < 0) {
-		pthread_mutex_unlock(&client->socket_lock);
-
+	if (n < 0) {
 		log_error(ERROR_NETWORK, "failed to send packet type");
 
 		return -1;
-	}
-
-	if (send(client->socket_fd, &config->num_rooms, sizeof config->num_rooms, 0) < 0) {
-		pthread_mutex_unlock(&client->socket_lock);
-
-		log_error(ERROR_NETWORK, "failed to send number of rooms");
-
-		return -1;
-	}
-
-	for (size_t i = 0; i < config->num_rooms; i++) {
-		size_t len = strlen(config->rooms[i].name);
-
-		if (send(client->socket_fd, &len, sizeof len, 0) < 0) {
-			pthread_mutex_unlock(&client->socket_lock);
-
-			log_error(ERROR_NETWORK, "failed to send room name length");
-
-			return -1;
-		}
-
-		if (send(client->socket_fd, config->rooms[i].name, len, 0) < 0) {
-			pthread_mutex_unlock(&client->socket_lock);
-
-			log_error(ERROR_NETWORK, "failed to send room name");
-
-			return -1;
-		}
-
-		len = strlen(config->rooms[i].desc);
-
-		if (send(client->socket_fd, &len, sizeof len, 0) < 0) {
-			pthread_mutex_unlock(&client->socket_lock);
-
-			log_error(ERROR_NETWORK, "failed to send room description length");
-
-			return -1;
-		}
-
-		if (send(client->socket_fd, config->rooms[i].desc, len, 0) < 0) {
-			pthread_mutex_unlock(&client->socket_lock);
-
-			log_error(ERROR_NETWORK, "failed to send room description");
-
-			return -1;
-		}
 	}
 
 	return 0;
@@ -267,7 +210,6 @@ static void *client_handler(void *arg) {
 		log_fatal(ERROR_THREAD, "failed to create client heartbeat thread");
 	}
 
-	// get rooms, send rooms
 	Config *config = read_config();
 
 	if (config == NULL) {
@@ -280,7 +222,7 @@ static void *client_handler(void *arg) {
 
 	while (TRUE) {
 		PacketType packet_type;
-		int n = recv(client.socket_fd, &packet_type, sizeof packet_type, 0);
+		int n = recv(client.socket_fd, &packet_type, sizeof packet_type, MSG_PEEK);
 
 		if (n < 0) {
 			log_error(ERROR_NETWORK, "failed to receive packet type");
@@ -300,40 +242,40 @@ static void *client_handler(void *arg) {
 		}
 
 		if (packet_type == PacketTypeHeartbeat) {
-			Heartbeat heartbeat;
-			int n = recv(client.socket_fd, &heartbeat, sizeof heartbeat, 0);
+			Serialised serialised = {0};
+			int ret = recv_packet(client.socket_fd, &serialised, &client.socket_lock);
 
-			if (n < 1) {
-				log_error(ERROR_NETWORK, "failed to receive pong");
+			if (ret < 0) {
+				log_error(ERROR_NETWORK, "failed to receive heartbeat");
 
+				break;
+			} else if (ret == 0) {
 				break;
 			}
 
-			client.heartbeat_status = heartbeat.status;
+			Heartbeat *heartbeat = unserialise_heartbeat(&serialised);
+			client.heartbeat_status = *heartbeat;
+
+			free(heartbeat);
 		} else if (packet_type == PacketTypeChatMessage) {
 			printf("received chat message\n");
 
-			ChatMessage msg = {0};
-			int n = recv(client.socket_fd, &msg.size, sizeof msg.size, 0);
+			Serialised serialised = {0};
+			int ret = recv_packet(client.socket_fd, &serialised, &client.socket_lock);
 
-			if (n < 1) {
-				log_error(ERROR_NETWORK, "failed to receive chat message size");
-
-				break;
-			}
-
-			msg.msg = calloc(1, msg.size + 1);
-			n = recv(client.socket_fd, msg.msg, msg.size, 0);
-
-			if (n < 1) {
+			if (ret < 0) {
 				log_error(ERROR_NETWORK, "failed to receive chat message");
 
 				break;
+			} else if (ret == 0) {
+				break;
 			}
 
-			fprintf(stderr, "msg: %s\n", msg.msg);
+			ChatMessage *msg = unserialise_chat_message(&serialised);
 
-			freep(&msg.msg);
+			fprintf(stderr, "msg: %s\n", msg);
+
+			freep(msg);
 		}
 	}
 
