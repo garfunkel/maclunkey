@@ -11,6 +11,21 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#define ERR_STRING(id, string) string,
+
+const char *error_to_string(const enum ErrId id) {
+	static const char *table[] = {ERR_TABLE(ERR_STRING)};
+
+#undef ERR_TABLE
+#undef ERR_STRING
+
+	if (id < 0 || id >= ERROR_UNKNOWN) {
+		return table[ERROR_UNKNOWN];
+	}
+
+	return table[id];
+}
+
 void do_nothing() {
 	// empty
 }

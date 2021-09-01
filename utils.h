@@ -11,6 +11,25 @@
 #define ENV_HOME "HOME"
 #define CONFIG_PATH ".config/" APP_NAME "/" APP_NAME ".config"
 
+#define ERR_TABLE(ERR)                       \
+	ERR(ERROR_NETWORK, "Network error")      \
+	ERR(ERROR_TERMINAL, "Terminal error")    \
+	ERR(ERROR_THREAD, "Thread error")        \
+	ERR(ERROR_HEARTBEAT, "Heartbeat error")  \
+	ERR(ERROR_CONFIG, "Configuration error") \
+	ERR(ERROR_OS, "OS-level error")          \
+	ERR(ERROR_UNKNOWN, "Unknown error")
+
+#define ERR_ID(id, string) id,
+
+enum ErrId
+{
+	ERR_TABLE(ERR_ID)
+#undef ERR_ID
+};
+
+const char *error_to_string(const enum ErrId id);
+
 #define log_error_x(type, id, err) \
 	fprintf(stderr, "%s: %s:%s:%d: %s: %s\n", type, __FILE__, __func__, __LINE__, error_to_string(id), err)
 
