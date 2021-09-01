@@ -20,8 +20,7 @@ int send_packet(const int socket_fd, const Serialised *serialised, pthread_mutex
 	while (total_bytes < serialised->size) {
 		if ((num_bytes = send(socket_fd, (char *)serialised->data + total_bytes, serialised->size - total_bytes, 0)) <
 		    0) {
-			// TODO: use log functions
-			fprintf(stderr, "failed to send network packet of size %d\n", serialised->size);
+			log_errorf(ERROR_NETWORK, "failed to send network packet of size %d", serialised->size);
 
 			ret = num_bytes;
 
@@ -44,7 +43,6 @@ int send_packet(const int socket_fd, const Serialised *serialised, pthread_mutex
 }
 
 int recv_packet(const int socket_fd, Serialised *serialised, pthread_mutex_t *mutex) {
-	// Serialised *serialised = malloc(sizeof *serialised);
 	char data[sizeof(PacketType) + sizeof serialised->size];
 	int num_bytes = 0;
 
@@ -53,8 +51,7 @@ int recv_packet(const int socket_fd, Serialised *serialised, pthread_mutex_t *mu
 	}
 
 	if ((num_bytes = recv(socket_fd, data, sizeof(PacketType) + sizeof serialised->size, MSG_PEEK)) < 0) {
-		// TODO: use log functions
-		fprintf(stderr, "N: %d\n", num_bytes);
+		log_errorf(ERROR_NETWORK, "failed to receive network packet of size %d", serialised->size);
 
 		free(serialised);
 
@@ -79,12 +76,12 @@ int recv_packet(const int socket_fd, Serialised *serialised, pthread_mutex_t *mu
 	num_bytes = 0;
 
 	while (total_bytes < serialised->size) {
-		if ((num_bytes = recv(socket_fd, serialised->data, serialised->size, 0)) < 0) {
+		if ((num_bytes = recv(socket_fd, (char *)serialised->data + total_bytes, serialised->size - total_bytes, 0)) <
+		    0) {
 			free(serialised->data);
 			free(serialised);
 
-			// TODO: use log functions
-			fprintf(stderr, "N: %d\n", num_bytes);
+			log_errorf(ERROR_NETWORK, "failed to receive network packet of size %d", serialised->size);
 
 			if (mutex != NULL) {
 				pthread_mutex_unlock(mutex);
