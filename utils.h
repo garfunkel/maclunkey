@@ -33,20 +33,20 @@ const char *error_to_string(const enum ErrId id);
 #define log_error_x(type, id, err) \
 	fprintf(stderr, "%s: %s:%s:%d: %s: %s\n", type, __FILE__, __func__, __LINE__, error_to_string(id), err)
 
-#define log_error_xf(type, id, fmt, ...)                                                                              \
-	char *__log_string = NULL;                                                                                        \
-	asprintf(&__log_string, fmt, __VA_ARGS__);                                                                        \
-	fprintf(stderr, "%s: %s:%s:%d: %s: %s\n", type, __FILE__, __func__, __LINE__, error_to_string(id), __log_string); \
-	free(__log_string);                                                                                               \
+#define log_error_xf(type, id, fmt, ...)       \
+	char *__log_string = NULL;                 \
+	asprintf(&__log_string, fmt, __VA_ARGS__); \
+	log_error_x(type, id, __log_string);       \
+	free(__log_string);                        \
 	__log_string = NULL
 
 #define log_x(type, msg) fprintf(stderr, "%s: %s:%s:%d: %s\n", type, __FILE__, __func__, __LINE__, msg)
 
-#define log_xf(type, fmt, ...)                                                               \
-	char *__log_string = NULL;                                                               \
-	asprintf(&__log_string, fmt, __VA_ARGS__);                                               \
-	fprintf(stderr, "%s: %s:%s:%d: %s\n", type, __FILE__, __func__, __LINE__, __log_string); \
-	free(__log_string);                                                                      \
+#define log_xf(type, fmt, ...)                 \
+	char *__log_string = NULL;                 \
+	asprintf(&__log_string, fmt, __VA_ARGS__); \
+	log_x(type, fmt, __log_string);            \
+	free(__log_string);                        \
 	__log_string = NULL
 
 #define log_fatal(id, err)         \
