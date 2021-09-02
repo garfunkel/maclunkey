@@ -46,9 +46,9 @@ typedef struct {
 
 static int configure_terminal(int signum);
 static void resize_terminal_handler();
-static int setup_chat_ui();
+static int setup_chat_ui(Context *context);
 static int setup_room_selection_ui(Context *context);
-static void select_room_keyboard_handler(Context *context, int ch);
+static int select_room_keyboard_handler(Context *context, int ch);
 static void chat_keyboard_handler(Context *context, ChatBuffer *chat_buffer, int ch);
 static void *keyboard_handler(void *arg);
 static int set_chat_message(const char *msg);
@@ -56,7 +56,7 @@ static int send_chat_message(Context *context, ChatMessage *msg);
 static int config_handler(Context *context);
 static int handle_heartbeat(Context *context);
 
-static void select_room_keyboard_handler(Context *context, int ch) {
+static int select_room_keyboard_handler(Context *context, int ch) {
 	switch (ch) {
 		case INPUT_UP:
 			if (context->room_index == 0) {
@@ -79,12 +79,22 @@ static void select_room_keyboard_handler(Context *context, int ch) {
 
 			break;
 
+		case INPUT_LINE_FEED:
+			if (context->room_index >= 0 && context->room_index < context->config->num_rooms) {
+				if (setup_chat_ui(context) < 0) {
+					log_error(ERROR_TERMINAL, "failed to setup UI");
+
+					return -1;
+				}
+			}
+
+			break;
+
 		default:
 			break;
 	}
 
-	// printf("%d\n", ch);
-	// fflush(stdout);
+	return 0;
 }
 
 static void chat_keyboard_handler(Context *context, ChatBuffer *chat_buffer, int ch) {
@@ -343,23 +353,28 @@ static int send_chat_message(Context *context, ChatMessage *msg) {
 static void resize_terminal_handler() {
 	log_info("received terminal resize signal");
 
-	switch (setup_chat_ui()) {
-		case 0: {
-			char null = INPUT_NULL;
+	struct winsize window_size;
 
-			if (ioctl(STDIN_FILENO, TIOCSTI, &null) < 0) {
-				log_error(ERROR_TERMINAL, "failed to send fake (null) input trigger");
-			}
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) < 0) {
+		log_error(ERROR_TERMINAL, "failed to get terminal size");
+	}
 
-			break;
+	if (window_size.ws_col < MIN_WINDOW_WIDTH || window_size.ws_row < MIN_WINDOW_HEIGHT) {
+		printf("%s\033[?25h", ANSI_CMD_CLEAR_SCREEN);
+		printf("\033[HTerminal must have at least:\n"
+		       "\t* %d columns\n"
+		       "\t* %d rows\n"
+		       "Please resize to continue.\n",
+		       MIN_WINDOW_WIDTH,
+		       MIN_WINDOW_HEIGHT);
+
+		fflush(stdout);
+	} else {
+		char null = INPUT_NULL;
+
+		if (ioctl(STDIN_FILENO, TIOCSTI, &null) < 0) {
+			log_error(ERROR_TERMINAL, "failed to send fake (null) input trigger");
 		}
-
-		// Terminal too small.
-		case 1:
-			break;
-
-		default:
-			log_error(ERROR_TERMINAL, "failed to setup UI");
 	}
 }
 
@@ -410,8 +425,9 @@ static int setup_room_selection_ui(Context *context) {
 	}
 
 	printf("\033[u\033[%dG\033[?25l", ROOM_LIST_LEFT_MARGIN - 1);
-
 	fflush(stdout);
+
+	context->screen = ScreenRoomSelection;
 
 	return 0;
 }
@@ -419,7 +435,7 @@ static int setup_room_selection_ui(Context *context) {
 /*
  * Draw chat UI on client terminal.
  */
-static int setup_chat_ui() {
+static int setup_chat_ui(Context *context) {
 	struct winsize window_size;
 
 	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) < 0) {
@@ -428,20 +444,7 @@ static int setup_chat_ui() {
 		return -1;
 	}
 
-	printf("%s", ANSI_CMD_CLEAR_SCREEN);
-
-	if (window_size.ws_col < MIN_WINDOW_WIDTH || window_size.ws_row < MIN_WINDOW_HEIGHT) {
-		printf("\033[HTerminal must have at least:\n"
-		       "\t* %d columns\n"
-		       "\t* %d rows\n"
-		       "Please resize to continue.\n",
-		       MIN_WINDOW_WIDTH,
-		       MIN_WINDOW_HEIGHT);
-
-		fflush(stdout);
-
-		return 1;
-	}
+	printf("%s\033[?25h", ANSI_CMD_CLEAR_SCREEN);
 
 	for (int row_num = 1; row_num < window_size.ws_row - 1; row_num++) {
 		printf("\033[%u;%uH\u2503", row_num, window_size.ws_col - CHAT_BOX_WIDTH);
@@ -475,6 +478,8 @@ static int setup_chat_ui() {
 		return -1;
 	}
 
+	context->screen = ScreenChat;
+
 	return 0;
 }
 
@@ -507,12 +512,7 @@ static int configure_terminal(int signum) {
 		}
 
 		printf("%s", ANSI_CMD_ENABLE_ALTERNATE_BUFFER);
-
-		/*if (setup_chat_ui() < 0) {
-		    log_error(ERROR_TERMINAL, "failed to setup UI");
-
-		    return -1;
-		}*/
+		fflush(stdout);
 	} else if (configured) {
 		log_info("resetting terminal");
 
@@ -545,7 +545,6 @@ static int config_handler(Context *context) {
 
 	context->config = unserialise_config(&serialised);
 	context->room_index = 0;
-	context->screen = ScreenRoomSelection;
 
 	return setup_room_selection_ui(context);
 }
