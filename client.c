@@ -20,10 +20,17 @@
 #define setup_terminal() configure_terminal(-1)
 #define reset_terminal() configure_terminal(0)
 
+typedef enum
+{
+	ScreenRoomSelection,
+	ScreenChat
+} Screen;
+
 typedef struct {
 	int socket_fd;
 	pthread_mutex_t socket_lock;
-} Server;
+	Screen screen;
+} Context;
 
 /*
  * Buffer for chat message which is yet to be sent.
@@ -37,14 +44,167 @@ typedef struct {
 static int configure_terminal(int signum);
 static void resize_terminal_handler();
 static int setup_ui();
+static void chat_keyboard_handler(Context *context, ChatBuffer *chat_buffer, int ch);
 static void *keyboard_handler(void *arg);
 static int set_chat_message(const char *msg);
-static int send_chat_message(Server *server, ChatMessage *msg);
-static int config_handler(Server *server);
-static int handle_heartbeat(Server *server);
+static int send_chat_message(Context *context, ChatMessage *msg);
+static int config_handler(Context *context);
+static int handle_heartbeat(Context *context);
+
+static void chat_keyboard_handler(Context *context, ChatBuffer *chat_buffer, int ch) {
+	switch (ch) {
+		case INPUT_NULL:
+			if (set_chat_message(chat_buffer->msg) < 0) {
+				log_error(ERROR_TERMINAL, "failed to set chat message");
+			}
+
+			printf("\033[%luG", chat_buffer->cursor_pos + CHAT_COL_START);
+
+			break;
+
+		case INPUT_TAB:
+			// TODO: change speaker video
+			break;
+
+		case INPUT_HOME:
+		case INPUT_HOME_2:
+			chat_buffer->cursor_pos = 0;
+			printf("\033[%luG", CHAT_COL_START);
+
+			break;
+
+		case INPUT_END:
+		case INPUT_END_2:
+			chat_buffer->cursor_pos = strlen(chat_buffer->msg);
+			printf("\033[%luG", chat_buffer->cursor_pos + CHAT_COL_START);
+
+			break;
+
+		case INPUT_ALT_LEFT:
+			// If we are on a space or the start of a word, go back to the previous word.
+			while (chat_buffer->cursor_pos > 0 && (isspace(chat_buffer->msg[chat_buffer->cursor_pos]) ||
+			                                       isspace(chat_buffer->msg[chat_buffer->cursor_pos - 1]))) {
+				chat_buffer->cursor_pos--;
+
+				printf("%s", ANSI_CMD_CURSOR_LEFT);
+			}
+
+			// Now go to the start of the word.
+			while (chat_buffer->cursor_pos > 0 && !isspace(chat_buffer->msg[chat_buffer->cursor_pos - 1])) {
+				chat_buffer->cursor_pos--;
+
+				printf("%s", ANSI_CMD_CURSOR_LEFT);
+			}
+
+			break;
+
+		case INPUT_ALT_RIGHT:
+			// If we are on a space or the end of a word, go forward to the next word.
+			while (chat_buffer->cursor_pos < strlen(chat_buffer->msg) &&
+			       (isspace(chat_buffer->msg[chat_buffer->cursor_pos]) ||
+			        isspace(chat_buffer->msg[chat_buffer->cursor_pos + 1]))) {
+				chat_buffer->cursor_pos++;
+
+				printf("%s", ANSI_CMD_CURSOR_RIGHT);
+			}
+
+			// Now go to the end of the word.
+			while (chat_buffer->cursor_pos < strlen(chat_buffer->msg) &&
+			       !isspace(chat_buffer->msg[chat_buffer->cursor_pos])) {
+				chat_buffer->cursor_pos++;
+
+				printf("%s", ANSI_CMD_CURSOR_RIGHT);
+			}
+
+			break;
+
+		case INPUT_LEFT:
+			if (chat_buffer->cursor_pos <= 0) {
+				break;
+			}
+
+			chat_buffer->cursor_pos--;
+
+			printf("%s", ANSI_CMD_CURSOR_LEFT);
+
+			break;
+
+		case INPUT_RIGHT:
+			if (chat_buffer->cursor_pos >= strlen(chat_buffer->msg)) {
+				break;
+			}
+
+			chat_buffer->cursor_pos++;
+
+			printf("%s", ANSI_CMD_CURSOR_RIGHT);
+
+			break;
+
+		case INPUT_LINE_FEED: {
+			if (send_chat_message(context, chat_buffer->msg) < 0) {
+				log_error(ERROR_NETWORK, "failed to send message");
+			}
+
+			chat_buffer->msg[0] = '\0';
+			chat_buffer->cursor_pos = 0;
+
+			printf("\033[%luG%s", CHAT_COL_START, ANSI_CMD_CLEAR_LINE);
+
+			break;
+		}
+
+		case INPUT_BACKSPACE:
+			if (chat_buffer->cursor_pos == 0) {
+				break;
+			}
+
+			chat_buffer->cursor_pos--;
+
+			memmove(chat_buffer->msg + chat_buffer->cursor_pos,
+			        chat_buffer->msg + chat_buffer->cursor_pos + 1,
+			        chat_buffer->size - chat_buffer->cursor_pos - 1);
+
+			if (set_chat_message(chat_buffer->msg) < 0) {
+				log_error(ERROR_TERMINAL, "failed to set chat message");
+			}
+
+			printf("\033[%luG", chat_buffer->cursor_pos + CHAT_COL_START);
+
+			break;
+
+		case INPUT_DELETE:
+		case INPUT_CTRL_D:
+			memmove(chat_buffer->msg + chat_buffer->cursor_pos,
+			        chat_buffer->msg + chat_buffer->cursor_pos + 1,
+			        chat_buffer->size - chat_buffer->cursor_pos - 1);
+
+			if (set_chat_message(chat_buffer->msg) < 0) {
+				log_error(ERROR_TERMINAL, "failed to set chat message");
+			}
+
+			printf("\033[%luG", chat_buffer->cursor_pos + CHAT_COL_START);
+
+			break;
+
+		default:
+			if (isprint(ch) && strlen(chat_buffer->msg) + 1 < chat_buffer->size) {
+				memmove(chat_buffer->msg + chat_buffer->cursor_pos + 1,
+				        chat_buffer->msg + chat_buffer->cursor_pos,
+				        chat_buffer->size - chat_buffer->cursor_pos - 1);
+				chat_buffer->msg[chat_buffer->cursor_pos] = (char)ch;
+				chat_buffer->cursor_pos++;
+
+				if (set_chat_message(chat_buffer->msg) < 0) {
+					log_error(ERROR_TERMINAL, "failed to set chat message");
+				}
+
+				printf("\033[%luG", chat_buffer->cursor_pos + CHAT_COL_START);
+			}
+	}
+}
 
 static void *keyboard_handler(void *arg) {
-	Server *server = (Server *)arg;
+	Context *context = (Context *)arg;
 	ChatBuffer chat_buffer = {0};
 
 	while (TRUE) {
@@ -54,8 +214,10 @@ static void *keyboard_handler(void *arg) {
 			break;
 		}
 
-		// fprintf(stderr, "%d ", ch);
-		// continue;
+		if (ch == INPUT_ESCAPE) {
+			break;
+		}
+
 		struct winsize window_size;
 
 		if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) < 0) {
@@ -83,167 +245,21 @@ static void *keyboard_handler(void *arg) {
 			chat_buffer.size = new_size;
 		}
 
-		switch (ch) {
-			case INPUT_NULL:
-				if (set_chat_message(chat_buffer.msg) < 0) {
-					log_error(ERROR_TERMINAL, "failed to set chat message");
-				}
+		switch (context->screen) {
+			case ScreenRoomSelection:
+				printf("\033[1B");
 
-				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
-
-				break;
-
-			case INPUT_ESCAPE:
-				if (close(server->socket_fd) < 0) {
-					log_error(ERROR_NETWORK, "failed to disconnect from server");
-				}
-
-				return NULL;
-
-			case INPUT_TAB:
-				// TODO: change speaker video
-				break;
-
-			case INPUT_HOME:
-			case INPUT_HOME_2:
-				chat_buffer.cursor_pos = 0;
-				printf("\033[%luG", CHAT_COL_START);
-
-				break;
-
-			case INPUT_END:
-			case INPUT_END_2:
-				chat_buffer.cursor_pos = strlen(chat_buffer.msg);
-				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
-
-				break;
-
-			case INPUT_ALT_LEFT:
-				// If we are on a space or the start of a word, go back to the previous word.
-				while (chat_buffer.cursor_pos > 0 && (isspace(chat_buffer.msg[chat_buffer.cursor_pos]) ||
-				                                      isspace(chat_buffer.msg[chat_buffer.cursor_pos - 1]))) {
-					chat_buffer.cursor_pos--;
-
-					printf("%s", ANSI_CMD_CURSOR_LEFT);
-				}
-
-				// Now go to the start of the word.
-				while (chat_buffer.cursor_pos > 0 && !isspace(chat_buffer.msg[chat_buffer.cursor_pos - 1])) {
-					chat_buffer.cursor_pos--;
-
-					printf("%s", ANSI_CMD_CURSOR_LEFT);
-				}
-
-				break;
-
-			case INPUT_ALT_RIGHT:
-				// If we are on a space or the end of a word, go forward to the next word.
-				while (chat_buffer.cursor_pos < strlen(chat_buffer.msg) &&
-				       (isspace(chat_buffer.msg[chat_buffer.cursor_pos]) ||
-				        isspace(chat_buffer.msg[chat_buffer.cursor_pos + 1]))) {
-					chat_buffer.cursor_pos++;
-
-					printf("%s", ANSI_CMD_CURSOR_RIGHT);
-				}
-
-				// Now go to the end of the word.
-				while (chat_buffer.cursor_pos < strlen(chat_buffer.msg) &&
-				       !isspace(chat_buffer.msg[chat_buffer.cursor_pos])) {
-					chat_buffer.cursor_pos++;
-
-					printf("%s", ANSI_CMD_CURSOR_RIGHT);
-				}
-
-				break;
-
-			case INPUT_LEFT:
-				if (chat_buffer.cursor_pos <= 0) {
-					break;
-				}
-
-				chat_buffer.cursor_pos--;
-
-				printf("%s", ANSI_CMD_CURSOR_LEFT);
-
-				break;
-
-			case INPUT_RIGHT:
-				if (chat_buffer.cursor_pos >= strlen(chat_buffer.msg)) {
-					break;
-				}
-
-				chat_buffer.cursor_pos++;
-
-				printf("%s", ANSI_CMD_CURSOR_RIGHT);
-
-				break;
-
-			case INPUT_LINE_FEED: {
-				if (send_chat_message(server, chat_buffer.msg) < 0) {
-					log_error(ERROR_NETWORK, "failed to send message");
-				}
-
-				chat_buffer.msg[0] = '\0';
-				chat_buffer.cursor_pos = 0;
-
-				printf("\033[%luG%s", CHAT_COL_START, ANSI_CMD_CLEAR_LINE);
-
-				break;
-			}
-
-			case INPUT_BACKSPACE:
-				if (chat_buffer.cursor_pos == 0) {
-					continue;
-				}
-
-				chat_buffer.cursor_pos--;
-
-				memmove(chat_buffer.msg + chat_buffer.cursor_pos,
-				        chat_buffer.msg + chat_buffer.cursor_pos + 1,
-				        chat_buffer.size - chat_buffer.cursor_pos - 1);
-
-				if (set_chat_message(chat_buffer.msg) < 0) {
-					log_error(ERROR_TERMINAL, "failed to set chat message");
-				}
-
-				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
-
-				break;
-
-			case INPUT_DELETE:
-			case INPUT_CTRL_D:
-				memmove(chat_buffer.msg + chat_buffer.cursor_pos,
-				        chat_buffer.msg + chat_buffer.cursor_pos + 1,
-				        chat_buffer.size - chat_buffer.cursor_pos - 1);
-
-				if (set_chat_message(chat_buffer.msg) < 0) {
-					log_error(ERROR_TERMINAL, "failed to set chat message");
-				}
-
-				printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
-
-				break;
+			case ScreenChat:
+				chat_keyboard_handler(context, &chat_buffer, ch);
 
 			default:
-				if (isprint(ch) && strlen(chat_buffer.msg) + 1 < chat_buffer.size) {
-					memmove(chat_buffer.msg + chat_buffer.cursor_pos + 1,
-					        chat_buffer.msg + chat_buffer.cursor_pos,
-					        chat_buffer.size - chat_buffer.cursor_pos - 1);
-					chat_buffer.msg[chat_buffer.cursor_pos] = (char)ch;
-					chat_buffer.cursor_pos++;
-
-					if (set_chat_message(chat_buffer.msg) < 0) {
-						log_error(ERROR_TERMINAL, "failed to set chat message");
-					}
-
-					printf("\033[%luG", chat_buffer.cursor_pos + CHAT_COL_START);
-				}
+				break;
 		}
 
 		fflush(stdout);
 	}
 
-	if (close(server->socket_fd) < 0) {
+	if (close(context->socket_fd) < 0) {
 		log_error(ERROR_NETWORK, "failed to disconnect from server");
 	}
 
@@ -265,12 +281,12 @@ static int set_chat_message(const char *msg) {
 	return 0;
 }
 
-static int send_chat_message(Server *server, ChatMessage *msg) {
+static int send_chat_message(Context *context, ChatMessage *msg) {
 	log_info("sending message");
 
 	Serialised *serialised = serialise_chat_message(msg);
 
-	if (send_packet(server->socket_fd, serialised, &server->socket_lock) < 0) {
+	if (send_packet(context->socket_fd, serialised, &context->socket_lock) < 0) {
 		log_error(ERROR_NETWORK, "failed to send chat message");
 
 		free(serialised);
@@ -423,9 +439,9 @@ static int configure_terminal(int signum) {
 	return 0;
 }
 
-static int config_handler(Server *server) {
+static int config_handler(Context *context) {
 	Serialised serialised = {0};
-	int ret = recv_packet(server->socket_fd, &serialised, &server->socket_lock);
+	int ret = recv_packet(context->socket_fd, &serialised, &context->socket_lock);
 
 	if (ret < 0) {
 		log_error(ERROR_NETWORK, "failed to receive configuration");
@@ -446,12 +462,14 @@ static int config_handler(Server *server) {
 
 	free(config);
 
+	context->screen = ScreenRoomSelection;
+
 	return 0;
 }
 
-int handle_heartbeat(Server *server) {
+int handle_heartbeat(Context *context) {
 	Serialised serialised = {0};
-	int ret = recv_packet(server->socket_fd, &serialised, &server->socket_lock);
+	int ret = recv_packet(context->socket_fd, &serialised, &context->socket_lock);
 
 	if (ret < 0) {
 		log_error(ERROR_NETWORK, "failed to receive heartbeat ping");
@@ -474,7 +492,7 @@ int handle_heartbeat(Server *server) {
 
 	free(heartbeat);
 
-	if (send_packet(server->socket_fd, send_serialised, &server->socket_lock) < 0) {
+	if (send_packet(context->socket_fd, send_serialised, &context->socket_lock) < 0) {
 		free(send_serialised);
 
 		log_error(ERROR_NETWORK, "failed to send pong");
@@ -494,13 +512,13 @@ int main() {
 		log_fatal(ERROR_NETWORK, "failed to parse IP address");
 	}
 
-	Server server = {.socket_fd = socket(AF_INET, SOCK_STREAM, 0), .socket_lock = PTHREAD_MUTEX_INITIALIZER};
+	Context context = {.socket_fd = socket(AF_INET, SOCK_STREAM, 0), .socket_lock = PTHREAD_MUTEX_INITIALIZER};
 
-	if (server.socket_fd < 0) {
+	if (context.socket_fd < 0) {
 		log_fatal(ERROR_NETWORK, "failed to construct socket");
 	}
 
-	if (connect(server.socket_fd, (struct sockaddr *)&server_addr, sizeof server_addr) < 0) {
+	if (connect(context.socket_fd, (struct sockaddr *)&server_addr, sizeof server_addr) < 0) {
 		log_fatal(ERROR_NETWORK, "failed to connect to server");
 	}
 
@@ -529,7 +547,7 @@ int main() {
 
 	pthread_t keyboard_thread;
 
-	if (pthread_create(&keyboard_thread, NULL, keyboard_handler, &server) != 0) {
+	if (pthread_create(&keyboard_thread, NULL, keyboard_handler, &context) != 0) {
 		log_fatal(ERROR_THREAD, "failed to start keyboard listening thread");
 	}
 
@@ -537,7 +555,7 @@ int main() {
 		PacketType packet_type;
 		int n = 0;
 
-		if ((n = recv(server.socket_fd, &packet_type, sizeof packet_type, MSG_PEEK)) == 0) {
+		if ((n = recv(context.socket_fd, &packet_type, sizeof packet_type, MSG_PEEK)) == 0) {
 			log_info("server disconnected");
 
 			break;
@@ -552,7 +570,7 @@ int main() {
 
 		switch (packet_type) {
 			case PacketTypeHeartbeat: {
-				handle_heartbeat(&server);
+				handle_heartbeat(&context);
 
 				break;
 			}
@@ -560,7 +578,7 @@ int main() {
 			case PacketTypeConfig: {
 				log_info("received config");
 
-				config_handler(&server);
+				config_handler(&context);
 
 				break;
 			}
@@ -569,7 +587,7 @@ int main() {
 		}
 	}
 
-	if (close(server.socket_fd) < 0) {
+	if (close(context.socket_fd) < 0) {
 		log_error(ERROR_NETWORK, "failed to disconnect from server");
 	}
 
