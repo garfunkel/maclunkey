@@ -52,6 +52,7 @@ int recv_packet(const int socket_fd, Serialised *serialised, pthread_mutex_t *mu
 
 	if ((num_bytes = recv(socket_fd, data, sizeof(PacketType) + sizeof serialised->size, MSG_PEEK)) < 0) {
 		log_errorf(ERROR_NETWORK, "failed to receive network packet of size %d", serialised->size);
+		perror("HERE");
 
 		free(serialised);
 

@@ -1,5 +1,6 @@
 #include "client.h"
 
+#include "drawing.h"
 #include "packets.h"
 #include "utils.h"
 
@@ -30,6 +31,8 @@ typedef struct {
 	int socket_fd;
 	pthread_mutex_t socket_lock;
 	Screen screen;
+	Config *config;
+	size_t room_index;
 } Context;
 
 /*
@@ -43,13 +46,46 @@ typedef struct {
 
 static int configure_terminal(int signum);
 static void resize_terminal_handler();
-static int setup_ui();
+static int setup_chat_ui();
+static int setup_room_selection_ui(Context *context);
+static void select_room_keyboard_handler(Context *context, int ch);
 static void chat_keyboard_handler(Context *context, ChatBuffer *chat_buffer, int ch);
 static void *keyboard_handler(void *arg);
 static int set_chat_message(const char *msg);
 static int send_chat_message(Context *context, ChatMessage *msg);
 static int config_handler(Context *context);
 static int handle_heartbeat(Context *context);
+
+static void select_room_keyboard_handler(Context *context, int ch) {
+	switch (ch) {
+		case INPUT_UP:
+			if (context->room_index == 0) {
+				break;
+			}
+
+			context->room_index--;
+
+			setup_room_selection_ui(context);
+
+			break;
+
+		case INPUT_DOWN:
+			if (context->room_index == context->config->num_rooms - 1) {
+				break;
+			}
+			context->room_index++;
+
+			setup_room_selection_ui(context);
+
+			break;
+
+		default:
+			break;
+	}
+
+	// printf("%d\n", ch);
+	// fflush(stdout);
+}
 
 static void chat_keyboard_handler(Context *context, ChatBuffer *chat_buffer, int ch) {
 	switch (ch) {
@@ -247,10 +283,14 @@ static void *keyboard_handler(void *arg) {
 
 		switch (context->screen) {
 			case ScreenRoomSelection:
-				printf("\033[1B");
+				select_room_keyboard_handler(context, ch);
+
+				break;
 
 			case ScreenChat:
 				chat_keyboard_handler(context, &chat_buffer, ch);
+
+				break;
 
 			default:
 				break;
@@ -259,7 +299,7 @@ static void *keyboard_handler(void *arg) {
 		fflush(stdout);
 	}
 
-	if (close(context->socket_fd) < 0) {
+	if (shutdown(context->socket_fd, SHUT_RDWR) < 0) {
 		log_error(ERROR_NETWORK, "failed to disconnect from server");
 	}
 
@@ -303,7 +343,7 @@ static int send_chat_message(Context *context, ChatMessage *msg) {
 static void resize_terminal_handler() {
 	log_info("received terminal resize signal");
 
-	switch (setup_ui()) {
+	switch (setup_chat_ui()) {
 		case 0: {
 			char null = INPUT_NULL;
 
@@ -324,9 +364,62 @@ static void resize_terminal_handler() {
 }
 
 /*
- * Draw UI on client terminal.
+ * Draw room selection UI on client terminal.
  */
-static int setup_ui() {
+static int setup_room_selection_ui(Context *context) {
+	struct winsize window_size;
+
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) < 0) {
+		log_error(ERROR_TERMINAL, "failed to get terminal size");
+
+		return -1;
+	}
+
+	printf("%s%s", ANSI_CMD_CLEAR_SCREEN, ANSI_CMD_CURSOR_RESET);
+	printf("%s %s - %s\n\n", APP_NAME, APP_VERSION, APP_DESC);
+	printf("Select room:\n\n");
+	printf("\033[%dG\033[1mName", ROOM_LIST_LEFT_MARGIN + 1);
+	printf("\033[%dGParticipants", ROOM_LIST_LEFT_MARGIN + ROOM_LIST_COLUMN_NAME_WIDTH + 1);
+	printf("\033[%dGDescription\033[0m\n",
+	       ROOM_LIST_LEFT_MARGIN + ROOM_LIST_COLUMN_NAME_WIDTH + ROOM_LIST_COLUMN_PARTICIPANTS_WIDTH + 1);
+
+	draw_line(ROOM_LIST_LEFT_MARGIN,
+	          CURSOR_CURRENT_POS,
+	          LineTypeHorizontal,
+	          window_size.ws_col - ROOM_LIST_LEFT_MARGIN - ROOM_LIST_RIGHT_MARGIN,
+	          CHAR_HORIZONTAL_LINE);
+
+	printf("\n\033[s");
+
+	for (size_t i = 0; i < context->config->num_rooms; i++) {
+		if (i == context->room_index) {
+			printf("\033[%dG\u27a4 \033[7m", ROOM_LIST_LEFT_MARGIN - 1);
+			print_multi(" ", window_size.ws_col - ROOM_LIST_RIGHT_MARGIN - ROOM_LIST_RIGHT_MARGIN);
+		}
+
+		printf("\033[%dG%s", ROOM_LIST_LEFT_MARGIN + 1, context->config->rooms[i].name);
+		// TODO: participants
+		printf("\033[%dG0", ROOM_LIST_LEFT_MARGIN + ROOM_LIST_COLUMN_NAME_WIDTH + 1);
+		printf("\033[%dG\033[3m%s\033[0m\n",
+		       ROOM_LIST_LEFT_MARGIN + ROOM_LIST_COLUMN_NAME_WIDTH + ROOM_LIST_COLUMN_PARTICIPANTS_WIDTH + 1,
+		       context->config->rooms[i].desc);
+
+		if (i == context->room_index) {
+			printf("\033[0m");
+		}
+	}
+
+	printf("\033[u\033[%dG\033[?25l", ROOM_LIST_LEFT_MARGIN - 1);
+
+	fflush(stdout);
+
+	return 0;
+}
+
+/*
+ * Draw chat UI on client terminal.
+ */
+static int setup_chat_ui() {
 	struct winsize window_size;
 
 	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) < 0) {
@@ -404,8 +497,7 @@ static int configure_terminal(int signum) {
 		}
 
 		configured = TRUE;
-		struct termios new_term = {0};
-		memcpy(&new_term, &old_term, sizeof old_term);
+		struct termios new_term = old_term;
 		new_term.c_lflag &= ~ECHO & ~ICANON;
 
 		if (tcsetattr(STDIN_FILENO, TCSANOW, &new_term) < 0) {
@@ -416,11 +508,11 @@ static int configure_terminal(int signum) {
 
 		printf("%s", ANSI_CMD_ENABLE_ALTERNATE_BUFFER);
 
-		if (setup_ui() < 0) {
-			log_error(ERROR_TERMINAL, "failed to setup UI");
+		/*if (setup_chat_ui() < 0) {
+		    log_error(ERROR_TERMINAL, "failed to setup UI");
 
-			return -1;
-		}
+		    return -1;
+		}*/
 	} else if (configured) {
 		log_info("resetting terminal");
 
@@ -430,7 +522,7 @@ static int configure_terminal(int signum) {
 			return -1;
 		}
 
-		printf("%s", ANSI_CMD_DISABLE_ALTERNATE_BUFFER);
+		printf("%s\033[?25h", ANSI_CMD_DISABLE_ALTERNATE_BUFFER);
 		fflush(stdout);
 	} else {
 		log_info("terminal not configured, no need for resetting");
@@ -449,22 +541,13 @@ static int config_handler(Context *context) {
 		return ret;
 	}
 
-	Config *config = unserialise_config(&serialised);
+	free(context->config);
 
-	printf("%s%s", ANSI_CMD_CLEAR_SCREEN, ANSI_CMD_CURSOR_RESET);
-	printf("Select room:\n");
-
-	for (size_t i = 0; i < config->num_rooms; i++) {
-		printf("%s - %s\n", config->rooms[i].name, config->rooms[i].desc);
-	}
-
-	fflush(stdout);
-
-	free(config);
-
+	context->config = unserialise_config(&serialised);
+	context->room_index = 0;
 	context->screen = ScreenRoomSelection;
 
-	return 0;
+	return setup_room_selection_ui(context);
 }
 
 int handle_heartbeat(Context *context) {
@@ -506,6 +589,8 @@ int handle_heartbeat(Context *context) {
 }
 
 int main() {
+	draw_init();
+
 	struct sockaddr_in server_addr = {.sin_family = AF_INET, .sin_port = htons(5000)};
 
 	if (inet_pton(AF_INET, "localhost", &server_addr.sin_addr) < 0) {
@@ -590,6 +675,8 @@ int main() {
 	if (close(context.socket_fd) < 0) {
 		log_error(ERROR_NETWORK, "failed to disconnect from server");
 	}
+
+	free(context.config);
 
 	if (reset_terminal() < 0) {
 		log_error(ERROR_TERMINAL, "failed to reset terminal");

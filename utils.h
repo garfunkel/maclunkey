@@ -2,7 +2,6 @@
 
 #include <stddef.h>
 
-#define APP_NAME "maclunkey"
 #define FALSE 0
 #define TRUE 1
 #define MAX_PARTICIPANTS 8
