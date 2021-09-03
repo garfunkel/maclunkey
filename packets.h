@@ -6,7 +6,7 @@
 typedef enum
 {
 	PacketTypeConfig,
-	PacketTypeStatusUpdate,
+	PacketTypeRoomAction,
 	PacketTypeHeartbeat,
 	PacketTypeChatMessage,
 	PacketTypeAudioFrame,
@@ -17,11 +17,11 @@ typedef uint8_t PacketType;
 
 typedef enum
 {
-	HeartbeatStatusPing,
-	HeartbeatStatusPong
-} _HeartbeatStatus;
+	HeartbeatPing,
+	HeartbeatPong
+} _Heartbeat;
 
-typedef uint8_t HeartbeatStatus;
+typedef uint8_t Heartbeat;
 
 typedef struct {
 	char *name;
@@ -29,11 +29,17 @@ typedef struct {
 } Room;
 
 typedef struct {
-	size_t num_rooms;
+	uint16_t num_rooms;
 	Room *rooms;
 } Config;
 
-typedef HeartbeatStatus Heartbeat;
+typedef enum
+{
+	ActionJoinRoom,
+	ActionLeaveRoom
+} _Action;
+
+typedef uint8_t Action;
 typedef char ChatMessage;
 
 typedef struct {
@@ -45,9 +51,11 @@ int send_packet(const int socket_fd, const Serialised *serialised, pthread_mutex
 int recv_packet(const int socket_fd, Serialised *serialised, pthread_mutex_t *mutex);
 
 Serialised *serialise_config(const Config *config);
-Serialised *serialise_heartbeat(const Heartbeat *heartbeat);
+Serialised *serialise_action(const Action action);
+Serialised *serialise_heartbeat(const Heartbeat heartbeat);
 Serialised *serialise_chat_message(const ChatMessage *msg);
 
 Config *unserialise_config(const Serialised *serialised);
-Heartbeat *unserialise_heartbeat(const Serialised *serialised);
+Action unserialise_action(const Serialised *serialised);
+Heartbeat unserialise_heartbeat(const Serialised *serialised);
 ChatMessage *unserialise_chat_message(const Serialised *serialised);
