@@ -32,7 +32,7 @@ typedef struct {
 	pthread_mutex_t socket_lock;
 	Screen screen;
 	Config *config;
-	size_t room_index;
+	uint16_t room_index;
 } Context;
 
 /*
@@ -80,7 +80,7 @@ static int select_room_keyboard_handler(Context *context, int ch) {
 			break;
 
 		case INPUT_LINE_FEED:
-			if (context->room_index >= 0 && context->room_index < context->config->num_rooms) {
+			if (context->room_index < context->config->num_rooms) {
 				if (setup_chat_ui(context) < 0) {
 					log_error(ERROR_TERMINAL, "failed to setup UI");
 
