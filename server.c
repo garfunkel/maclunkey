@@ -153,15 +153,15 @@ static Config *read_config() {
 					stripped[i] = '\0';
 					value = &stripped[i + 1];
 
+					if (section == ConfigSectionRooms) {
+						config->rooms = realloc(config->rooms, sizeof *config->rooms * (config->num_rooms + 1));
+						config->rooms[config->num_rooms].name = strip_whitespace(key);
+						config->rooms[config->num_rooms].desc = strip_whitespace(value);
+						config->num_rooms++;
+					}
+
 					break;
 				}
-			}
-
-			if (section == ConfigSectionRooms) {
-				config->rooms = realloc(config->rooms, sizeof *config->rooms * (config->num_rooms + 1));
-				config->rooms[config->num_rooms].name = strdup(key);
-				config->rooms[config->num_rooms].desc = strdup(value);
-				config->num_rooms++;
 			}
 		}
 
