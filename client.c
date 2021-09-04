@@ -27,12 +27,23 @@ typedef enum
 	ScreenChat
 } Screen;
 
+typedef enum
+{
+	DisconnectionMethodNone,
+	DisconnectionMethodUser,
+	DisconnectionMethodServer,
+	DisconnectionMethodClientInterrupted,
+	DisconnectionMethodClientError,
+	DisconnectionMethodServerError
+} DisconnectionMethod;
+
 typedef struct {
 	int socket_fd;
 	pthread_mutex_t socket_lock;
 	Screen screen;
 	Config *config;
-	uint16_t room_index;
+	int16_t room_index;
+	DisconnectionMethod disconnection_method;
 } Context;
 
 /*
@@ -46,6 +57,7 @@ typedef struct {
 
 static int configure_terminal(int signum);
 static void resize_terminal_handler();
+static int join_room(Context *context);
 static int setup_chat_ui(Context *context);
 static int setup_room_selection_ui(Context *context);
 static int select_room_keyboard_handler(Context *context, int ch);
@@ -59,33 +71,42 @@ static int handle_heartbeat(Context *context);
 static int select_room_keyboard_handler(Context *context, int ch) {
 	switch (ch) {
 		case INPUT_UP:
-			if (context->room_index == 0) {
-				break;
+			if (context->room_index <= ROOM_LIST_INDEX_CREATE_ROOM) {
+				context->room_index = context->config->num_rooms - 1;
+			} else {
+				context->room_index--;
 			}
-
-			context->room_index--;
 
 			setup_room_selection_ui(context);
 
 			break;
 
 		case INPUT_DOWN:
-			if (context->room_index == context->config->num_rooms - 1) {
-				break;
+			if (context->room_index >= context->config->num_rooms - 1) {
+				context->room_index = ROOM_LIST_INDEX_CREATE_ROOM;
+			} else if (context->room_index == ROOM_LIST_INDEX_CREATE_ROOM) {
+				context->room_index = ROOM_LIST_INDEX_ENTER_USERNAME;
+			} else {
+				context->room_index++;
 			}
-			context->room_index++;
 
 			setup_room_selection_ui(context);
 
 			break;
 
 		case INPUT_LINE_FEED:
-			if (context->room_index < context->config->num_rooms) {
-				if (setup_chat_ui(context) < 0) {
-					log_error(ERROR_TERMINAL, "failed to setup UI");
+			if (context->room_index == ROOM_LIST_INDEX_ENTER_USERNAME) {
+				// TODO enter username
+			} else if (context->room_index == ROOM_LIST_INDEX_CREATE_ROOM) {
+				// TODO create new room
+			} else if (context->room_index < context->config->num_rooms) {
+				join_room(context);
 
-					return -1;
-				}
+				/*if (setup_chat_ui(context) < 0) {
+				    log_error(ERROR_TERMINAL, "failed to setup UI");
+
+				    return -1;
+				}*/
 			}
 
 			break;
@@ -257,10 +278,20 @@ static void *keyboard_handler(void *arg) {
 		int ch = 0;
 
 		if (read(STDIN_FILENO, &ch, sizeof ch) <= 0) {
+			log_error(ERROR_OS, "failed to read from STDIN");
+
+			if (context->disconnection_method == DisconnectionMethodNone) {
+				context->disconnection_method = DisconnectionMethodClientError;
+			}
+
 			break;
 		}
 
 		if (ch == INPUT_ESCAPE) {
+			if (context->disconnection_method == DisconnectionMethodNone) {
+				context->disconnection_method = DisconnectionMethodUser;
+			}
+
 			break;
 		}
 
@@ -269,7 +300,11 @@ static void *keyboard_handler(void *arg) {
 		if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) < 0) {
 			log_error(ERROR_TERMINAL, "failed to get terminal size");
 
-			return NULL;
+			if (context->disconnection_method == DisconnectionMethodNone) {
+				context->disconnection_method = DisconnectionMethodClientError;
+			}
+
+			break;
 		}
 
 		if (window_size.ws_col < MIN_WINDOW_WIDTH || window_size.ws_row < MIN_WINDOW_HEIGHT) {
@@ -291,6 +326,7 @@ static void *keyboard_handler(void *arg) {
 			chat_buffer.size = new_size;
 		}
 
+		// TODO: handle return values
 		switch (context->screen) {
 			case ScreenRoomSelection:
 				select_room_keyboard_handler(context, ch);
@@ -310,7 +346,13 @@ static void *keyboard_handler(void *arg) {
 	}
 
 	if (shutdown(context->socket_fd, SHUT_RDWR) < 0) {
-		log_error(ERROR_NETWORK, "failed to disconnect from server");
+		if (errno != EBADF) {
+			log_error(ERROR_NETWORK, "failed to disconnect from server");
+
+			if (context->disconnection_method == DisconnectionMethodNone) {
+				context->disconnection_method = DisconnectionMethodClientError;
+			}
+		}
 	}
 
 	return NULL;
@@ -392,7 +434,15 @@ static int setup_room_selection_ui(Context *context) {
 
 	printf("%s%s", ANSI_CMD_CLEAR_SCREEN, ANSI_CMD_CURSOR_RESET);
 	printf("%s %s - %s\n\n", APP_NAME, APP_VERSION, APP_DESC);
-	printf("Select room:\n\n");
+
+	if (context->room_index == ROOM_LIST_INDEX_ENTER_USERNAME) {
+		printf("\033[%dG\u27a4\033[%ldG\033[s",
+		       ROOM_LIST_LEFT_MARGIN - 1,
+		       ROOM_LIST_LEFT_MARGIN + strlen(ROOM_LIST_TITLE_ENTER_USERNAME) + 2);
+	}
+
+	printf("\033[%dG\033[1m%s \033[0m", ROOM_LIST_LEFT_MARGIN + 1, ROOM_LIST_TITLE_ENTER_USERNAME);
+	printf("\n\n%s\n\n", ROOM_LIST_TITLE_ROOM_LIST);
 	printf("\033[%dG\033[1mName", ROOM_LIST_LEFT_MARGIN + 1);
 	printf("\033[%dGParticipants", ROOM_LIST_LEFT_MARGIN + ROOM_LIST_COLUMN_NAME_WIDTH + 1);
 	printf("\033[%dGDescription\033[0m\n",
@@ -404,9 +454,9 @@ static int setup_room_selection_ui(Context *context) {
 	          window_size.ws_col - ROOM_LIST_LEFT_MARGIN - ROOM_LIST_RIGHT_MARGIN,
 	          CHAR_HORIZONTAL_LINE);
 
-	printf("\n\033[s");
+	printf("\n");
 
-	for (size_t i = 0; i < context->config->num_rooms; i++) {
+	for (int16_t i = 0; i < context->config->num_rooms; i++) {
 		if (i == context->room_index) {
 			printf("\033[%dG\u27a4 \033[7m", ROOM_LIST_LEFT_MARGIN - 1);
 			print_multi(" ", window_size.ws_col - ROOM_LIST_RIGHT_MARGIN - ROOM_LIST_RIGHT_MARGIN);
@@ -424,10 +474,46 @@ static int setup_room_selection_ui(Context *context) {
 		}
 	}
 
-	printf("\033[u\033[%dG\033[?25l", ROOM_LIST_LEFT_MARGIN - 1);
+	printf("\n");
+
+	if (context->room_index == ROOM_LIST_INDEX_CREATE_ROOM) {
+		printf("\033[%dG\u27a4\033[%ldG\033[s",
+		       ROOM_LIST_LEFT_MARGIN - 1,
+		       ROOM_LIST_LEFT_MARGIN + strlen(ROOM_LIST_TITLE_CREATE_ROOM) + 2);
+	}
+
+	printf("\033[%dG\033[1m%s \033[0m", ROOM_LIST_LEFT_MARGIN + 1, ROOM_LIST_TITLE_CREATE_ROOM);
+
+	if (context->room_index == ROOM_LIST_INDEX_ENTER_USERNAME) {
+		printf("\033[u\033[?25h");
+	} else if (context->room_index == ROOM_LIST_INDEX_CREATE_ROOM) {
+		printf("\033[u\033[?25h");
+	} else {
+		printf("\033[?25l");
+	}
+
 	fflush(stdout);
 
 	context->screen = ScreenRoomSelection;
+
+	return 0;
+}
+
+/**
+ * Join chat room
+ */
+static int join_room(Context *context) {
+	Serialised *serialised = serialise_join_room(context->room_index);
+
+	if (send_packet(context->socket_fd, serialised, &context->socket_lock) < 0) {
+		log_error(ERROR_NETWORK, "failed to send room joining packet");
+
+		return -1;
+	}
+
+	// get room participants, chat history etc
+
+	free(serialised);
 
 	return 0;
 }
@@ -514,8 +600,6 @@ static int configure_terminal(int signum) {
 		printf("%s", ANSI_CMD_ENABLE_ALTERNATE_BUFFER);
 		fflush(stdout);
 	} else if (configured) {
-		log_info("resetting terminal");
-
 		if (tcsetattr(STDIN_FILENO, TCSANOW, &old_term) < 0) {
 			log_error(ERROR_TERMINAL, "failed to set terminal attributes");
 
@@ -523,7 +607,10 @@ static int configure_terminal(int signum) {
 		}
 
 		printf("%s\033[?25h", ANSI_CMD_DISABLE_ALTERNATE_BUFFER);
+
 		fflush(stdout);
+
+		log_info("terminal reset");
 	} else {
 		log_info("terminal not configured, no need for resetting");
 	}
@@ -592,7 +679,9 @@ int main() {
 		log_fatal(ERROR_NETWORK, "failed to parse IP address");
 	}
 
-	Context context = {.socket_fd = socket(AF_INET, SOCK_STREAM, 0), .socket_lock = PTHREAD_MUTEX_INITIALIZER};
+	Context context = {.socket_fd = socket(AF_INET, SOCK_STREAM, 0),
+	                   .socket_lock = PTHREAD_MUTEX_INITIALIZER,
+	                   .disconnection_method = DisconnectionMethodNone};
 
 	if (context.socket_fd < 0) {
 		log_fatal(ERROR_NETWORK, "failed to construct socket");
@@ -631,18 +720,34 @@ int main() {
 		log_fatal(ERROR_THREAD, "failed to start keyboard listening thread");
 	}
 
+	if (pthread_detach(keyboard_thread) != 0) {
+		log_fatal(ERROR_THREAD, "failed to detach client handling thread");
+	}
+
 	while (TRUE) {
 		PacketType packet_type;
 		int n = 0;
 
 		if ((n = recv(context.socket_fd, &packet_type, sizeof packet_type, MSG_PEEK)) == 0) {
-			log_info("server disconnected");
+			if (context.disconnection_method == DisconnectionMethodNone) {
+				context.disconnection_method = DisconnectionMethodServer;
+			}
 
 			break;
 		} else if (n < 0) {
-			// If EINTR received something like SIGINT was received.
-			if (errno != EINTR) {
-				log_error(ERROR_NETWORK, "failed to receive packet type");
+			if (errno == EINTR) {
+				if (context.disconnection_method == DisconnectionMethodNone) {
+					context.disconnection_method = DisconnectionMethodClientInterrupted;
+				}
+			} else {
+				if (context.disconnection_method == DisconnectionMethodNone) {
+					context.disconnection_method = DisconnectionMethodServerError;
+				}
+
+				// If EINTR received something like SIGINT was received.
+				if (errno != EINTR) {
+					log_error(ERROR_NETWORK, "failed to receive packet type");
+				}
 			}
 
 			break;
@@ -675,6 +780,36 @@ int main() {
 
 	if (reset_terminal() < 0) {
 		log_error(ERROR_TERMINAL, "failed to reset terminal");
+	}
+
+	switch (context.disconnection_method) {
+		case DisconnectionMethodUser:
+			log_info("shutting down due to user action");
+
+			break;
+
+		case DisconnectionMethodServer:
+			log_info("shutting down due to server disconnection");
+
+			break;
+
+		case DisconnectionMethodClientInterrupted:
+			log_info("shutting down due to client interruption/signal received");
+
+			break;
+
+		case DisconnectionMethodClientError:
+			log_error(ERROR_OS, "shutting down due to client error");
+
+			break;
+
+		case DisconnectionMethodServerError:
+			log_error(ERROR_NETWORK, "shutting down due to server error");
+
+			break;
+
+		default:
+			log_error(ERROR_UNKNOWN, "shutting down due to unknown reason");
 	}
 
 	return EXIT_SUCCESS;

@@ -19,8 +19,6 @@ void print_multi(const char *str, int n) {
 int draw_line(int x, int y, LineType type, int length, wchar_t ch) {
 	int ret = -1;
 
-	printf("\033[s");
-
 	if (x >= 0 && y >= 0) {
 		printf("\033[%d;%dH", y + 1, x + 1);
 	} else if (x < 0) {
@@ -42,8 +40,6 @@ int draw_line(int x, int y, LineType type, int length, wchar_t ch) {
 
 		ret = 0;
 	}
-
-	printf("\033[u");
 
 	return ret;
 }

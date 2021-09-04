@@ -6,7 +6,8 @@
 typedef enum
 {
 	PacketTypeConfig,
-	PacketTypeRoomAction,
+	PacketTypeJoinRoom,
+	PacketTypeLeaveRoom,
 	PacketTypeHeartbeat,
 	PacketTypeChatMessage,
 	PacketTypeAudioFrame,
@@ -33,13 +34,7 @@ typedef struct {
 	Room *rooms;
 } Config;
 
-typedef enum
-{
-	ActionJoinRoom,
-	ActionLeaveRoom
-} _Action;
-
-typedef uint8_t Action;
+typedef int16_t RoomIndex;
 typedef char ChatMessage;
 
 typedef struct {
@@ -51,11 +46,12 @@ int send_packet(const int socket_fd, const Serialised *serialised, pthread_mutex
 int recv_packet(const int socket_fd, Serialised *serialised, pthread_mutex_t *mutex);
 
 Serialised *serialise_config(const Config *config);
-Serialised *serialise_action(const Action action);
+Serialised *serialise_join_room(RoomIndex room_number);
+Serialised *serialise_leave_room();
 Serialised *serialise_heartbeat(const Heartbeat heartbeat);
 Serialised *serialise_chat_message(const ChatMessage *msg);
 
 Config *unserialise_config(const Serialised *serialised);
-Action unserialise_action(const Serialised *serialised);
+RoomIndex unserialise_join_room(const Serialised *serialised);
 Heartbeat unserialise_heartbeat(const Serialised *serialised);
 ChatMessage *unserialise_chat_message(const Serialised *serialised);

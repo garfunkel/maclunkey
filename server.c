@@ -253,6 +253,28 @@ static void *client_handler(void *arg) {
 			}
 
 			client.heartbeat = unserialise_heartbeat(&serialised);
+		} else if (packet_type == PacketTypeJoinRoom) {
+			printf("received room join request\n");
+
+			Serialised serialised = {0};
+			int ret = recv_packet(client.socket_fd, &serialised, &client.socket_lock);
+
+			if (ret < 0) {
+				log_error(ERROR_NETWORK, "failed to receive room joining packet");
+
+				break;
+			} else if (ret == 0) {
+				break;
+			}
+
+			RoomIndex index = unserialise_join_room(&serialised);
+
+		} else if (packet_type == PacketTypeLeaveRoom) {
+			printf("received room leave request\n");
+
+			if (send_config(&client, config) < 0) {
+				log_error(ERROR_CONFIG, "failed to send configuration to client");
+			}
 		} else if (packet_type == PacketTypeChatMessage) {
 			printf("received chat message\n");
 

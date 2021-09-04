@@ -140,7 +140,20 @@ Serialised *serialise_heartbeat(const Heartbeat heartbeat) {
 
 	char *pos = mempcpy(serialised->data, &packet_type, sizeof packet_type);
 	pos = mempcpy(pos, &serialised->size, sizeof serialised->size);
-	pos = mempcpy(pos, &heartbeat, sizeof heartbeat);
+	memcpy(pos, &heartbeat, sizeof heartbeat);
+
+	return serialised;
+}
+
+Serialised *serialise_join_room(RoomIndex index) {
+	PacketType packet_type = PacketTypeJoinRoom;
+	Serialised *serialised = malloc(sizeof *serialised);
+	serialised->size = sizeof packet_type + sizeof index;
+	serialised->data = malloc(serialised->size);
+
+	char *pos = mempcpy(serialised->data, &packet_type, sizeof packet_type);
+	pos = mempcpy(pos, &serialised->size, sizeof serialised->size);
+	memcpy(pos, &index, sizeof index);
 
 	return serialised;
 }
@@ -153,7 +166,7 @@ Serialised *serialise_chat_message(const ChatMessage *msg) {
 
 	char *pos = mempcpy(serialised->data, &packet_type, sizeof packet_type);
 	pos = mempcpy(pos, &serialised->size, sizeof serialised->size);
-	pos = mempcpy(pos, msg, strlen(msg) + 1);
+	memcpy(pos, msg, strlen(msg) + 1);
 
 	return serialised;
 }
@@ -179,6 +192,10 @@ Config *unserialise_config(const Serialised *serialised) {
 }
 
 Heartbeat unserialise_heartbeat(const Serialised *serialised) {
+	return ((char *)serialised->data)[sizeof(PacketType) + sizeof serialised->size];
+}
+
+RoomIndex unserialise_join_room(const Serialised *serialised) {
 	return ((char *)serialised->data)[sizeof(PacketType) + sizeof serialised->size];
 }
 
