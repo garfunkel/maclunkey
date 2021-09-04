@@ -29,9 +29,8 @@ static void *heartbeat_handler(void *arg) {
 	}
 
 	while (TRUE) {
-		Heartbeat heartbeat = HeartbeatStatusPing;
-		Serialised *serialised = serialise_heartbeat(&heartbeat);
-		client->heartbeat_status = HeartbeatStatusPing;
+		client->heartbeat = HeartbeatPing;
+		Serialised *serialised = serialise_heartbeat(client->heartbeat);
 
 		if (send_packet(client->socket_fd, serialised, &client->socket_lock) < 0) {
 			log_error(ERROR_HEARTBEAT, "failed to send packet type");
@@ -44,7 +43,7 @@ static void *heartbeat_handler(void *arg) {
 			break;
 		}
 
-		if (client->heartbeat_status != HeartbeatStatusPong) {
+		if (client->heartbeat != HeartbeatPong) {
 			pthread_mutex_lock(&client->socket_lock);
 
 			// Check if client has already disconnected.
@@ -253,10 +252,7 @@ static void *client_handler(void *arg) {
 				break;
 			}
 
-			Heartbeat *heartbeat = unserialise_heartbeat(&serialised);
-			client.heartbeat_status = *heartbeat;
-
-			free(heartbeat);
+			client.heartbeat = unserialise_heartbeat(&serialised);
 		} else if (packet_type == PacketTypeChatMessage) {
 			printf("received chat message\n");
 

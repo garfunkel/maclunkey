@@ -132,15 +132,15 @@ Serialised *serialise_config(const Config *config) {
 	return serialised;
 }
 
-Serialised *serialise_heartbeat(const Heartbeat *heartbeat) {
+Serialised *serialise_heartbeat(const Heartbeat heartbeat) {
 	PacketType packet_type = PacketTypeHeartbeat;
 	Serialised *serialised = malloc(sizeof *serialised);
-	serialised->size = sizeof packet_type + sizeof serialised->size + sizeof *heartbeat;
+	serialised->size = sizeof packet_type + sizeof serialised->size + sizeof heartbeat;
 	serialised->data = malloc(serialised->size);
 
 	char *pos = mempcpy(serialised->data, &packet_type, sizeof packet_type);
 	pos = mempcpy(pos, &serialised->size, sizeof serialised->size);
-	pos = mempcpy(pos, heartbeat, sizeof *heartbeat);
+	pos = mempcpy(pos, &heartbeat, sizeof heartbeat);
 
 	return serialised;
 }
@@ -178,11 +178,8 @@ Config *unserialise_config(const Serialised *serialised) {
 	return config;
 }
 
-Heartbeat *unserialise_heartbeat(const Serialised *serialised) {
-	Heartbeat *heartbeat = malloc(sizeof *heartbeat);
-
-	return memcpy(
-	    heartbeat, (char *)serialised->data + sizeof(PacketType) + sizeof serialised->size, sizeof *heartbeat);
+Heartbeat unserialise_heartbeat(const Serialised *serialised) {
+	return ((char *)serialised->data)[sizeof(PacketType) + sizeof serialised->size];
 }
 
 ChatMessage *unserialise_chat_message(const Serialised *serialised) {

@@ -31,7 +31,7 @@ int draw_line(int x, int y, LineType type, int length, wchar_t ch) {
 
 	if (type == LineTypeVertical) {
 		for (int i = 0; i < length; i++) {
-			printf("%lc", (wint_t)ch);
+			printf("%lc\033[1B\033[1D", (wint_t)ch);
 		}
 
 		ret = 0;

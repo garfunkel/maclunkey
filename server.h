@@ -10,7 +10,7 @@
 
 typedef struct {
 	int socket_fd;
-	HeartbeatStatus heartbeat_status;
+	Heartbeat heartbeat;
 	pthread_t thread;
 	pthread_t heartbeat_thread;
 	pthread_mutex_t socket_lock;

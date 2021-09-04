@@ -561,18 +561,14 @@ int handle_heartbeat(Context *context) {
 		return 0;
 	}
 
-	Heartbeat *heartbeat = unserialise_heartbeat(&serialised);
-
-	if (*heartbeat != HeartbeatStatusPing) {
+	if (unserialise_heartbeat(&serialised) != HeartbeatPing) {
 		log_error(ERROR_NETWORK, "heartbeat from server was not a ping... this is awkward...");
 
 		return -1;
 	}
 
-	*heartbeat = HeartbeatStatusPong;
+	Heartbeat heartbeat = HeartbeatPong;
 	Serialised *send_serialised = serialise_heartbeat(heartbeat);
-
-	free(heartbeat);
 
 	if (send_packet(context->socket_fd, send_serialised, &context->socket_lock) < 0) {
 		free(send_serialised);
